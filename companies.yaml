@@ -1,0 +1,46 @@
+# Companies whose official, public ATS job-board APIs are polled.
+# ats: greenhouse | lever | ashby | smartrecruiters
+# board: the company's board slug in that ATS (e.g. boards.greenhouse.io/<board>)
+# Set enabled: false to pause a company. Add more freely — run `python run.py --check-sources` to validate.
+companies:
+  # --- Greenhouse ---
+  - {name: Databricks, ats: greenhouse, board: databricks}
+  - {name: Sigmoid, ats: greenhouse, board: sigmoid}
+  - {name: Rubrik, ats: greenhouse, board: rubrik}
+  - {name: Zscaler, ats: greenhouse, board: zscaler}
+  - {name: MongoDB, ats: greenhouse, board: mongodb}
+  - {name: Glean, ats: greenhouse, board: gleanwork}
+  - {name: HackerRank, ats: greenhouse, board: hackerrank}
+  - {name: Twilio, ats: greenhouse, board: twilio}
+  - {name: Coinbase, ats: greenhouse, board: coinbase}
+  - {name: Turing, ats: greenhouse, board: turing}
+  - {name: Pure Storage, ats: greenhouse, board: purestorage}
+  - {name: Stripe, ats: greenhouse, board: stripe}
+  - {name: Elastic, ats: greenhouse, board: elastic}
+  - {name: Groww, ats: greenhouse, board: groww}
+  - {name: Observe.AI, ats: greenhouse, board: observeai}
+  - {name: Samsara, ats: greenhouse, board: samsara}
+  - {name: Druva, ats: greenhouse, board: druva}
+  - {name: HighRadius, ats: greenhouse, board: highradius}
+  - {name: Agoda, ats: greenhouse, board: agoda}
+  - {name: Okta, ats: greenhouse, board: okta}
+  - {name: New Relic, ats: greenhouse, board: newrelic}
+  - {name: Yugabyte, ats: greenhouse, board: yugabyte}
+  # --- Lever ---
+  - {name: Meesho, ats: lever, board: meesho}
+  - {name: Netomi, ats: lever, board: netomi}
+  - {name: Paytm, ats: lever, board: paytm}
+  - {name: Zeta, ats: lever, board: zeta}
+  - {name: Mindtickle, ats: lever, board: mindtickle}
+  - {name: CRED, ats: lever, board: cred}
+  - {name: FamPay, ats: lever, board: fampay}
+  # --- Ashby ---
+  - {name: Sarvam AI, ats: ashby, board: sarvam}
+  - {name: OpenAI, ats: ashby, board: openai}
+  - {name: Atlan, ats: ashby, board: atlan}
+  - {name: Composio, ats: ashby, board: composio}
+  - {name: Notion, ats: ashby, board: notion}
+  - {name: ElevenLabs, ats: ashby, board: elevenlabs}
+  # --- SmartRecruiters (India postings only) ---
+  - {name: ServiceNow, ats: smartrecruiters, board: ServiceNow}
+  - {name: Freshworks, ats: smartrecruiters, board: Freshworks}
