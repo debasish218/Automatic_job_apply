@@ -1,0 +1,12 @@
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: job-assistant-searxng
+    ports:
+      - "127.0.0.1:8888:8080"     # bound to localhost only
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-change-me-local-only}
+      - SEARXNG_BASE_URL=http://localhost:8888/
+    restart: "no"                  # started on demand by the app, never at boot

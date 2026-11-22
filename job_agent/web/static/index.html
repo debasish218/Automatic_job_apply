@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Job Assistant</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◆</span>
+    <div>
+      <div class="title">Job Assistant</div>
+      <div class="subtitle" id="profile-line">Loading…</div>
+    </div>
+  </div>
+  <div class="pills" id="pills"></div>
+  <div class="run">
+    <div class="step" id="step"></div>
+    <button id="btn-run" class="btn primary">Start discovery</button>
+  </div>
+</header>
+
+<section class="stats" id="stats"></section>
+
+<main class="layout">
+  <nav class="tabs" id="tabs">
+    <button data-view="ready" class="active">Ready to send <span class="count" id="c-ready"></span></button>
+    <button data-view="matches">All matches <span class="count" id="c-matches"></span></button>
+    <button data-view="sent">Sent <span class="count" id="c-sent"></span></button>
+    <button data-view="filtered">Filtered out</button>
+    <button data-view="skipped">Skipped</button>
+    <button data-view="companies">Companies</button>
+    <button data-view="activity">Activity</button>
+  </nav>
+
+  <section class="panel" id="list-panel">
+    <div class="list-head">
+      <input id="search" type="search" placeholder="Filter by company, title, location…">
+    </div>
+    <div id="list"></div>
+  </section>
+</main>
+
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-inner" id="drawer-body"></div>
+</aside>
+<div class="scrim" id="scrim"></div>
+
+<div class="modal" id="modal" aria-hidden="true">
+  <div class="modal-card" id="modal-body"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

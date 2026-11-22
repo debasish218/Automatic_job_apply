@@ -1,3 +1,3 @@
-from .base import JobPosting, JobSource, load_sources
+from .base import JobPosting
 
-__all__ = ["JobPosting", "JobSource", "load_sources"]
+__all__ = ["JobPosting"]

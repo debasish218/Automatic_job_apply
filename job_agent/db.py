@@ -77,7 +77,31 @@ CREATE TABLE IF NOT EXISTS emails (
     sent_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_emails_status ON emails(status);
+
+CREATE TABLE IF NOT EXISTS search_queries (
+    query TEXT PRIMARY KEY,
+    last_run TEXT,
+    runs INTEGER DEFAULT 0,
+    results INTEGER DEFAULT 0,
+    postings INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    level TEXT NOT NULL,
+    message TEXT NOT NULL,
+    job_id INTEGER
+);
 """
+
+# Columns added after the first release (applied with ALTER TABLE if missing).
+MIGRATIONS = {
+    "jobs": [("site", "TEXT"), ("snippet", "TEXT"), ("company_domain", "TEXT"), ("page_status", "TEXT")],
+    "recruiters": [("evidence", "TEXT"), ("kind", "TEXT"), ("domain_match", "INTEGER")],
+    "analyses": [("model", "TEXT")],
+    "emails": [("model", "TEXT")],
+}
 
 # Job statuses
 NEW, FILTERED, ANALYZED, PENDING, SKIPPED, EMAILED, DUPLICATE, ERROR = (
@@ -99,10 +123,16 @@ def fingerprint(company: str, title: str, location: str) -> str:
 
 class Database:
     def __init__(self, path: Path | str):
-        self.conn = sqlite3.connect(str(path))
+        self.conn = sqlite3.connect(str(path), check_same_thread=False, timeout=30)
+        self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        for table, cols in MIGRATIONS.items():
+            have = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            for name, typ in cols:
+                if name not in have:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {typ}")
         self.conn.commit()
 
     def close(self) -> None:
@@ -129,6 +159,10 @@ class Database:
              job.get("url"), job.get("description"), job.get("posted_at"), ts, ts,
              DUPLICATE if dup else NEW, f"same company/title/location as job #{dup['id']}" if dup else None,
              dup["id"] if dup else None))
+        extra = {k: job[k] for k in ("site", "snippet", "company_domain", "page_status") if job.get(k)}
+        if extra:
+            self.conn.execute(f"UPDATE jobs SET {', '.join(f'{k}=?' for k in extra)} WHERE id=?",
+                              (*extra.values(), cur.lastrowid))
         self.conn.commit()
         return cur.lastrowid, dup is None
 
@@ -153,11 +187,11 @@ class Database:
         self.conn.execute(
             """INSERT OR REPLACE INTO analyses (job_id, score, matching_skills, missing_skills, required_experience,
                 experience_comparison, experience_gap, relevance, recommendation, reasoning, best_resume,
-                company_highlights, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                company_highlights, created_at, model) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (job_id, a["score"], json.dumps(a["matching_skills"]), json.dumps(a["missing_skills"]),
              a["required_experience"], a["experience_comparison"], int(a["experience_gap"]), a["relevance"],
              a["recommendation"], a["reasoning"], a["best_resume"], json.dumps(a.get("company_highlights", [])),
-             now()))
+             now(), a.get("model")))
         self.conn.commit()
 
     def get_analysis(self, job_id: int) -> dict | None:
@@ -172,23 +206,34 @@ class Database:
 
     # ---------------------------------------------------------------- recruiters
     def add_recruiter(self, job_id: int, *, email: str | None, verification: str, source_url: str | None,
-                      name: str | None = None, designation: str | None = None, linkedin: str | None = None) -> None:
-        self.conn.execute(
+                      name: str | None = None, designation: str | None = None, linkedin: str | None = None,
+                      evidence: str | None = None, kind: str | None = None, domain_match: bool | None = None) -> int:
+        if not email and linkedin:
+            r = self.conn.execute("SELECT id FROM recruiters WHERE job_id=? AND linkedin=?", (job_id, linkedin)).fetchone()
+            if r:
+                return r["id"]
+        cur = self.conn.execute(
             """INSERT OR IGNORE INTO recruiters (job_id, name, designation, email, linkedin, source_url,
-               verification, created_at) VALUES (?,?,?,?,?,?,?,?)""",
-            (job_id, name, designation, email.lower() if email else None, linkedin, source_url, verification, now()))
+               verification, created_at, evidence, kind, domain_match) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (job_id, name, designation, email.lower() if email else None, linkedin, source_url, verification, now(),
+             evidence, kind, None if domain_match is None else int(domain_match)))
         self.conn.commit()
+        return cur.lastrowid
+
+    def get_recruiter(self, rid: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM recruiters WHERE id=?", (rid,)).fetchone()
+        return dict(row) if row else None
 
     def get_recruiters(self, job_id: int) -> list[dict]:
         return [dict(r) for r in self.conn.execute("SELECT * FROM recruiters WHERE job_id=? ORDER BY id", (job_id,))]
 
     # ---------------------------------------------------------------- emails
     def save_email(self, job_id: int, recipient: str, recruiter_name: str | None, subject: str, body: str,
-                   attachment: str) -> int:
+                   attachment: str, model: str | None = None) -> int:
         cur = self.conn.execute(
-            """INSERT INTO emails (job_id, recipient, recruiter_name, subject, body, attachment, status, created_at)
-               VALUES (?,?,?,?,?,?,'draft',?)""",
-            (job_id, recipient.lower(), recruiter_name, subject, body, attachment, now()))
+            """INSERT INTO emails (job_id, recipient, recruiter_name, subject, body, attachment, status, created_at,
+               model) VALUES (?,?,?,?,?,?,'draft',?,?)""",
+            (job_id, recipient.lower(), recruiter_name, subject, body, attachment, now(), model))
         self.conn.commit()
         return cur.lastrowid
 
@@ -225,9 +270,72 @@ class Database:
         return self.conn.execute("SELECT COUNT(*) FROM emails WHERE status='sent' AND sent_at>=?",
                                  (today,)).fetchone()[0]
 
+    def job_exists(self, external_id: str) -> bool:
+        return self.conn.execute("SELECT 1 FROM jobs WHERE external_id=?", (external_id,)).fetchone() is not None
+
+    # ---------------------------------------------------------------- search queries
+    def due_queries(self, queries: list[str], cooldown_hours: float, limit: int) -> list[str]:
+        cutoff = (datetime.now() - timedelta(hours=cooldown_hours)).isoformat(timespec="seconds")
+        last = {r["query"]: r["last_run"] for r in self.conn.execute("SELECT query, last_run FROM search_queries")}
+        due = [q for q in queries if not last.get(q) or last[q] < cutoff]
+        due.sort(key=lambda q: last.get(q) or "")
+        return due[:limit]
+
+    def record_query(self, query: str, results: int, postings: int) -> None:
+        self.conn.execute(
+            """INSERT INTO search_queries (query, last_run, runs, results, postings) VALUES (?,?,1,?,?)
+               ON CONFLICT(query) DO UPDATE SET last_run=excluded.last_run, runs=runs+1,
+               results=results+excluded.results, postings=postings+excluded.postings""",
+            (query, now(), results, postings))
+        self.conn.commit()
+
+    # ---------------------------------------------------------------- events
+    def log_event(self, message: str, level: str = "info", job_id: int | None = None) -> None:
+        self.conn.execute("INSERT INTO events (ts, level, message, job_id) VALUES (?,?,?,?)",
+                          (now(), level, message, job_id))
+        self.conn.commit()
+
+    def recent_events(self, after_id: int = 0, limit: int = 200) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM events WHERE id>? ORDER BY id DESC LIMIT ?", (after_id, limit))][::-1]
+
+    # ---------------------------------------------------------------- dashboard queries
+    def list_jobs(self, statuses: list[str] | None = None, limit: int = 500) -> list[dict]:
+        q = """SELECT j.id, j.company, j.title, j.location, j.url, j.site, j.source, j.status, j.status_reason,
+                      j.experience_req, j.discovered_at, a.score, a.recommendation, a.best_resume,
+                      (SELECT COUNT(*) FROM recruiters r WHERE r.job_id=j.id) AS contacts,
+                      (SELECT COUNT(*) FROM recruiters r WHERE r.job_id=j.id AND r.email IS NOT NULL) AS emails_found,
+                      (SELECT e.status FROM emails e WHERE e.job_id=j.id ORDER BY e.id DESC LIMIT 1) AS email_status
+               FROM jobs j LEFT JOIN analyses a ON a.job_id=j.id"""
+        args: tuple = ()
+        if statuses:
+            q += f" WHERE j.status IN ({','.join('?' * len(statuses))})"
+            args = tuple(statuses)
+        q += " ORDER BY COALESCE(a.score,-1) DESC, j.id DESC LIMIT ?"
+        return [dict(r) for r in self.conn.execute(q, (*args, limit))]
+
+    def list_emails(self, status: str | None = None) -> list[dict]:
+        q = "SELECT e.*, j.company, j.title FROM emails e JOIN jobs j ON j.id=e.job_id"
+        args: tuple = ()
+        if status:
+            q += " WHERE e.status=?"
+            args = (status,)
+        return [dict(r) for r in self.conn.execute(q + " ORDER BY e.id DESC", args)]
+
+    def companies(self) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            """SELECT j.company, COUNT(*) jobs, MAX(a.score) best_score, MAX(j.company_domain) domain,
+                      SUM(CASE WHEN j.status='pending_review' THEN 1 ELSE 0 END) pending,
+                      SUM(CASE WHEN j.status='emailed' THEN 1 ELSE 0 END) emailed
+               FROM jobs j LEFT JOIN analyses a ON a.job_id=j.id GROUP BY lower(j.company)
+               ORDER BY best_score DESC NULLS LAST, jobs DESC""")]
+
     # ---------------------------------------------------------------- stats
     def stats(self) -> dict[str, int]:
         d = {r["status"]: r["n"] for r in self.conn.execute("SELECT status, COUNT(*) n FROM jobs GROUP BY status")}
         d["total"] = sum(d.values())
         d["emails_sent"] = self.conn.execute("SELECT COUNT(*) FROM emails WHERE status='sent'").fetchone()[0]
+        d["sent_today"] = self.sent_today()
+        d["companies"] = self.conn.execute("SELECT COUNT(DISTINCT lower(company)) FROM jobs").fetchone()[0]
+        d["queries_run"] = self.conn.execute("SELECT COALESCE(SUM(runs),0) FROM search_queries").fetchone()[0]
         return d

@@ -1,14 +1,10 @@
-"""Common types and HTTP handling for public job-board APIs (no scraping of restricted sites)."""
+"""Common job posting type and HTML helpers."""
 from __future__ import annotations
 
 import logging
-import time
-from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
-from pathlib import Path
 
 import requests
-import yaml
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -48,51 +44,3 @@ def make_session(user_agent: str) -> requests.Session:
                   allowed_methods=("GET",), respect_retry_after_header=True)
     s.mount("https://", HTTPAdapter(max_retries=retry))
     return s
-
-
-class JobSource(ABC):
-    """One company's public ATS job board."""
-
-    kind: str = ""
-    request_delay_sec = 1.0  # polite gap between requests to the same provider
-
-    def __init__(self, company: str, board: str, session: requests.Session):
-        self.company = company
-        self.board = board
-        self.session = session
-
-    def __repr__(self) -> str:
-        return f"{self.kind}:{self.board}"
-
-    def _get_json(self, url: str, **params):
-        time.sleep(self.request_delay_sec)
-        r = self.session.get(url, params=params or None, timeout=30)
-        r.raise_for_status()
-        return r.json()
-
-    @abstractmethod
-    def fetch(self) -> list[JobPosting]:
-        """Return all postings (descriptions may be filled lazily via fetch_description)."""
-
-    def fetch_description(self, posting: JobPosting) -> str:
-        return posting.description
-
-
-def load_sources(companies_file: Path, session: requests.Session) -> list[JobSource]:
-    from .ashby import AshbySource
-    from .greenhouse import GreenhouseSource
-    from .lever import LeverSource
-    from .smartrecruiters import SmartRecruitersSource
-
-    kinds = {c.kind: c for c in (GreenhouseSource, LeverSource, AshbySource, SmartRecruitersSource)}
-    data = yaml.safe_load(companies_file.read_text()) or {}
-    sources: list[JobSource] = []
-    for entry in data.get("companies", []):
-        if not entry.get("enabled", True):
-            continue
-        cls = kinds.get(entry.get("ats"))
-        if not cls:
-            log.warning("Unknown ATS %r for %s", entry.get("ats"), entry.get("name"))
-            continue
-        sources.append(cls(entry["name"], entry["board"], session))
-    return sources

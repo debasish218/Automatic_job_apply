@@ -28,7 +28,7 @@ def _float(name: str, default: float) -> float:
 class Settings:
     gemini_api_key: str | None
     gemini_model: str = "gemini-3.5-flash"
-    gemini_min_interval_sec: float = 6.0       # client-side throttle (free-tier friendly)
+    gemini_min_interval_sec: float = 4.0       # client-side throttle (free-tier friendly)
     min_match_score: int = 50                   # below this, no email is drafted
     daily_email_limit: int = 20                 # hard cap on emails sent per day
     duplicate_window_days: int = 30            # don't email same recipient+company again within N days
@@ -49,7 +49,6 @@ class Settings:
     ])
 
     resumes_dir: Path = PROJECT_ROOT / "resumes"
-    companies_file: Path = PROJECT_ROOT / "companies.yaml"
     db_path: Path = PROJECT_ROOT / "data" / "jobs.db"
     cache_dir: Path = PROJECT_ROOT / "data" / "cache"
     log_dir: Path = PROJECT_ROOT / "logs"
@@ -57,6 +56,15 @@ class Settings:
     gmail_token: Path = PROJECT_ROOT / "credentials" / "token.json"
 
     http_user_agent: str = "JobSearchAssistant/1.0 (personal, manual-run job search tool)"
+    page_user_agent: str = "Mozilla/5.0 (compatible; JobSearchAssistant/1.0; personal job search)"
+
+    searxng_url: str = "http://localhost:8888"
+    search_min_interval_sec: float = 20.0       # engines block fast querying; keep this slow
+    queries_per_pass: int = 12
+    query_cooldown_hours: float = 24.0          # don't repeat the same query within this window
+    max_posting_age_days: int = 45
+    auto_draft: bool = True                     # draft an email automatically when a contact email is found
+    web_port: int = 8765
 
 
 def load_settings(env_file: Path | None = None) -> Settings:
@@ -66,6 +74,10 @@ def load_settings(env_file: Path | None = None) -> Settings:
     s.gemini_min_interval_sec = _float("GEMINI_MIN_INTERVAL_SEC", s.gemini_min_interval_sec)
     s.min_match_score = _int("MIN_MATCH_SCORE", s.min_match_score)
     s.daily_email_limit = _int("DAILY_EMAIL_LIMIT", s.daily_email_limit)
+    s.searxng_url = os.getenv("SEARXNG_URL", s.searxng_url)
+    s.search_min_interval_sec = _float("SEARCH_MIN_INTERVAL_SEC", s.search_min_interval_sec)
+    s.queries_per_pass = _int("QUERIES_PER_PASS", s.queries_per_pass)
+    s.web_port = _int("WEB_PORT", s.web_port)
     if os.getenv("JOB_AGENT_DB"):
         s.db_path = Path(os.environ["JOB_AGENT_DB"])
     for d in (s.db_path.parent, s.cache_dir, s.log_dir, s.gmail_credentials.parent):
