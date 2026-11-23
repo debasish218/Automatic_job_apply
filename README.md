@@ -54,6 +54,28 @@ provider) → resume analysis (cached) → Gmail status → SearXNG status → d
 3. Filters (reason recorded): India, AI/ML title, not senior, minimum experience ≤ 2 years, not stale/closed.
 4. Gemini match → contact search → email draft (when a contact email exists).
 
+### Experience rules (enforced in code)
+| Job asks for | Result |
+|---|---|
+| 1+ yrs, 1–3, 1–4, 1–any · 0–2 or more · 2+ yrs | kept (2+ yrs: email addresses the gap honestly) |
+| 0–1 yr, fresher, entry level, graduate | skipped, unless a strong employer — then kept with score capped at 60 |
+| 3+ yrs, internships, trainee roles | skipped |
+
+### Emails
+* Written by Gemini from recruiter-style instructions (120–180 words: role + experience, 3–5 matching skills,
+  1–2 projects with outcomes, closing). Gemini returns the parts; the app assembles them, so greeting,
+  paragraphs and signature are always on separate lines.
+* Resume attached with a professional name, e.g. `Firstname_Lastname_AI_ML_Engineer_Resume.pdf`.
+* Achievements are only described as the resume states them (no tools/causes added).
+
+### Contacts you add yourself
+* Jobs with no email found show **+ Add email**: enter a recruiter address you found, and Gemini drafts the email.
+* For jobs where search found an email, the recipient is locked (server-enforced) — pick another found contact
+  with **Write email** to change it.
+* **Find emails for matches without one** runs a deeper email-focused search (hiring posts, "send your CV to…",
+  company careers/contact pages) for every match lacking an email. Recruiters shown hiring for an unrelated
+  function (e.g. finance) are flagged and never auto-selected.
+
 ### Contact policy
 Emails are kept only if they appear **verbatim** in the cited source (checked in code). Data-broker sites
 are excluded, masked/pattern addresses rejected, nothing is guessed. Labels: *Verified on page*, *Seen in

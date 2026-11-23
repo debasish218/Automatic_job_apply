@@ -9,7 +9,7 @@ RESUME = Path(__file__).resolve().parent.parent / "resumes" / "AI_ML.pdf"
 
 
 def test_message_has_body_and_pdf_attachment():
-    m = build_message("me@x.com", "hr@acme.com", "ML Engineer – Name", "Hello\nBody", RESUME)
+    m = build_message("me@x.com", "hr@acme.com", "ML Engineer – Name", "Hello\nBody", RESUME, "AI_ML.pdf")
     parsed = message_from_bytes(m.as_bytes(), policy=policy.default)
     assert parsed["To"] == "hr@acme.com" and parsed["Subject"] == "ML Engineer – Name"
     parts = list(parsed.walk())

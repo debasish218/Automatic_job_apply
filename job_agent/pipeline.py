@@ -228,20 +228,43 @@ class Pipeline:
             return self.db.get_analysis(job_id)
 
     # ============================================================== contacts
-    def discover_contacts(self, job_id: int) -> list[dict]:
+    def _reuse_company_contacts(self, job: dict) -> int:
+        """Copy email contacts already found for another job at the same company (saves searches)."""
+        rows = self.db.conn.execute(
+            """SELECT DISTINCT r.* FROM recruiters r JOIN jobs j ON j.id=r.job_id
+               WHERE lower(j.company)=lower(?) AND j.id<>? AND r.email IS NOT NULL AND r.verification<>'user_provided'""",
+            (job["company"], job["id"])).fetchall()
+        for r in rows:
+            self.db.add_recruiter(job["id"], email=r["email"], verification=r["verification"], source_url=r["source_url"],
+                                  name=r["name"], designation=r["designation"], linkedin=r["linkedin"],
+                                  evidence=r["evidence"], kind=r["kind"],
+                                  domain_match=None if r["domain_match"] is None else bool(r["domain_match"]))
+        return len(rows)
+
+    def discover_contacts(self, job_id: int, deep: bool | None = None) -> list[dict]:
+        """Quick search first; if no email is found, a deeper email-focused search (deep=None → automatic)."""
+        recs = self._discover_contacts(job_id, deep=bool(deep))
+        if deep is None and self.s.deep_email_search and not any(r["email"] for r in recs):
+            recs = self._discover_contacts(job_id, deep=True)
+        return recs
+
+    def _discover_contacts(self, job_id: int, deep: bool) -> list[dict]:
         with self._lock:
             job = self.db.get_job(job_id)
+            if self._reuse_company_contacts(job):
+                self.event(f"Reused contacts already found for {job['company']}", "muted", job_id)
             # 1) emails printed in the job description itself
             for c in emails_in_text(job.get("description") or "", job.get("url") or ""):
                 self.db.add_recruiter(job_id, email=c.email, verification="verified_on_page", source_url=c.source_url,
                                       designation="Contact in job posting", kind="job_post_contact",
                                       evidence=c.context.strip()[:300])
             # 2) web search for recruiters / HR / careers contacts
-            self.status_text = f"Searching recruiter contacts: {job['company']}"
+            self.status_text = (f"Deep email search: {job['company']}" if deep
+                                else f"Searching recruiter contacts: {job['company']}")
             try:
                 found, domain, _ = self._gemini(self.contacts.find, job["company"], job["title"],
                                                 job.get("location") or "", job.get("url") or "",
-                                                job.get("description") or "", job.get("company_domain"))
+                                                job.get("description") or "", job.get("company_domain"), deep)
             except (QuotaExhausted, GeminiBusy):
                 raise
             except Exception as e:
@@ -256,10 +279,39 @@ class Pipeline:
                                       evidence=c.evidence, kind=c.kind, domain_match=c.domain_match)
             recs = self.db.get_recruiters(job_id)
             n_email = sum(1 for r in recs if r["email"])
-            self.event(f"Contacts for {job['company']}: {len(recs)} found, {n_email} with email", "info", job_id)
+            self.db.conn.execute("UPDATE jobs SET contacts_searched=? WHERE id=?",
+                                 (f"{'deep' if deep else 'quick'} {dbm.now()}", job_id))
+            self.db.conn.commit()
+            self.event(f"{'Deep email search' if deep else 'Contacts'} for {job['company']}: {len(recs)} contacts, "
+                       f"{n_email} with email", "good" if n_email else "info", job_id)
             return recs
 
+    def find_missing_emails(self, stop: threading.Event) -> tuple[int, int]:
+        """Deep email search for every match that has no email contact yet. Returns (searched, found)."""
+        jobs = [j for j in self.db.list_jobs([dbm.PENDING]) if not j["emails_found"]]
+        searched = found = 0
+        self.event(f"Email search started for {len(jobs)} matches without an email.")
+        for j in jobs:
+            if stop.is_set():
+                break
+            recs = self._discover_contacts(j["id"], deep=True)
+            searched += 1
+            if any(r["email"] for r in recs):
+                found += 1
+                self.auto_draft(j["id"])
+        self.event(f"Email search finished: {searched} matches searched, emails found for {found}.",
+                   "good" if found else "info")
+        self.status_text = "idle"
+        return searched, found
+
     def add_user_recruiter(self, job_id: int, email: str, name: str | None, source: str | None) -> int:
+        job = self.db.get_job(job_id)
+        if not job:
+            raise ValueError("Job not found")
+        if job["status"] == dbm.EMAILED:
+            raise ValueError("This job has already been emailed.")
+        if any(r["email"] and r["verification"] != USER_PROVIDED for r in self.db.get_recruiters(job_id)):
+            raise ValueError("This job already has an email found by search; manual emails are only for jobs without one.")
         if not is_valid_email(email):
             raise ValueError(f"Not a valid email address: {email}")
         return self.db.add_recruiter(job_id, email=email.strip(), name=name or None, verification=USER_PROVIDED,
@@ -268,7 +320,7 @@ class Pipeline:
 
     @staticmethod
     def best_recipient(recs: list[dict]) -> dict | None:
-        usable = [r for r in recs if r["email"]]
+        usable = [r for r in recs if r["email"] and r.get("kind") != "other_function"]
         if not usable:
             return None
         order = {"user_provided": 0, "job_post_contact": 1, "recruiter": 2, "hr_inbox": 3, "careers_inbox": 4}
@@ -302,7 +354,7 @@ class Pipeline:
                 self.db.update_email(prev["id"], status="replaced")
             attachment = str(self.resume.variants[m.best_resume].path)
             eid = self.db.save_email(job_id, recruiter["email"], recruiter.get("name"), d.subject, d.body, attachment,
-                                     self.gemini.last_model_used)
+                                     self.gemini.last_model_used, d.attachment_filename)
             self.event(f"Email drafted for {job['title']} @ {job['company']} → {recruiter['email']}", "info", job_id)
             return self.db.get_email(eid)
 
@@ -310,8 +362,8 @@ class Pipeline:
         e = self.db.get_email(email_id)
         if not e or e["status"] != "draft":
             raise ValueError("Only drafts can be edited")
-        if not is_valid_email(recipient):
-            raise ValueError(f"Not a valid email address: {recipient}")
+        if recipient.strip().lower() != e["recipient"]:
+            raise ValueError("The recipient can't be changed. Write a new email from another contact instead.")
         if attachment_key not in self.resume.variants:
             raise ValueError(f"Unknown resume: {attachment_key}")
         if not subject.strip() or not body.strip():
@@ -341,7 +393,7 @@ class Pipeline:
             return SendResult(False, f"Attachment missing: {att}")
         self.db.update_email(email_id, status="approved")
         try:
-            mid = self.gmail.send(e["recipient"], e["subject"], e["body"], att)
+            mid = self.gmail.send(e["recipient"], e["subject"], e["body"], att, e.get("attachment_filename"))
         except Exception as ex:
             log.exception("Send failed")
             self.db.update_email(email_id, status="draft", error=str(ex))

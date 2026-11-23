@@ -25,7 +25,8 @@ class GmailStatus:
     account: str | None = None
 
 
-def build_message(sender: str | None, to: str, subject: str, body: str, attachment: Path) -> EmailMessage:
+def build_message(sender: str | None, to: str, subject: str, body: str, attachment: Path,
+                  filename: str | None = None) -> EmailMessage:
     if not attachment.exists():
         raise FileNotFoundError(f"Attachment not found: {attachment}")
     msg = EmailMessage()
@@ -36,7 +37,8 @@ def build_message(sender: str | None, to: str, subject: str, body: str, attachme
     msg.set_content(body)
     ctype, _ = mimetypes.guess_type(attachment.name)
     maintype, subtype = (ctype or "application/octet-stream").split("/", 1)
-    msg.add_attachment(attachment.read_bytes(), maintype=maintype, subtype=subtype, filename=attachment.name)
+    msg.add_attachment(attachment.read_bytes(), maintype=maintype, subtype=subtype,
+                       filename=filename or attachment.name)
     return msg
 
 
@@ -107,12 +109,12 @@ class GmailClient:
         self.token_file.chmod(0o600)
         return self.check()
 
-    def send(self, to: str, subject: str, body: str, attachment: Path) -> str:
+    def send(self, to: str, subject: str, body: str, attachment: Path, filename: str | None = None) -> str:
         if self._service is None:
             st = self.check()
             if not st.ready:
                 raise RuntimeError(st.detail)
-        msg = build_message(self.account, to, subject, body, attachment)
+        msg = build_message(self.account, to, subject, body, attachment, filename)
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
         sent = self._service.users().messages().send(userId="me", body={"raw": raw}).execute()
         log.info("Sent email to %s, gmail id %s", to, sent.get("id"))

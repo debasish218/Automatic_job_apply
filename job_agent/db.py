@@ -97,10 +97,11 @@ CREATE TABLE IF NOT EXISTS events (
 
 # Columns added after the first release (applied with ALTER TABLE if missing).
 MIGRATIONS = {
-    "jobs": [("site", "TEXT"), ("snippet", "TEXT"), ("company_domain", "TEXT"), ("page_status", "TEXT")],
+    "jobs": [("site", "TEXT"), ("snippet", "TEXT"), ("company_domain", "TEXT"), ("page_status", "TEXT"),
+             ("contacts_searched", "TEXT")],
     "recruiters": [("evidence", "TEXT"), ("kind", "TEXT"), ("domain_match", "INTEGER")],
     "analyses": [("model", "TEXT")],
-    "emails": [("model", "TEXT")],
+    "emails": [("model", "TEXT"), ("attachment_filename", "TEXT")],
 }
 
 # Job statuses
@@ -229,11 +230,11 @@ class Database:
 
     # ---------------------------------------------------------------- emails
     def save_email(self, job_id: int, recipient: str, recruiter_name: str | None, subject: str, body: str,
-                   attachment: str, model: str | None = None) -> int:
+                   attachment: str, model: str | None = None, attachment_filename: str | None = None) -> int:
         cur = self.conn.execute(
             """INSERT INTO emails (job_id, recipient, recruiter_name, subject, body, attachment, status, created_at,
-               model) VALUES (?,?,?,?,?,?,'draft',?,?)""",
-            (job_id, recipient.lower(), recruiter_name, subject, body, attachment, now(), model))
+               model, attachment_filename) VALUES (?,?,?,?,?,?,'draft',?,?,?)""",
+            (job_id, recipient.lower(), recruiter_name, subject, body, attachment, now(), model, attachment_filename))
         self.conn.commit()
         return cur.lastrowid
 

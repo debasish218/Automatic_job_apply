@@ -59,6 +59,10 @@ class ContactOut(BaseModel):
     evidence_quote: str = Field(description="Short verbatim quote from that source supporting this contact")
     kind: str = Field(description="recruiter | hr_inbox | careers_inbox | job_post_contact | other")
     works_at_company: bool = Field(description="True only if the source clearly ties this contact to the company")
+    relevant_to_role: bool = Field(default=True, description="False if the source shows this person/inbox hires for a "
+                                   "clearly different function (finance, accounting, sales, HR ops, non-tech "
+                                   "trainees, a different country only). True for tech/engineering/AI hiring or "
+                                   "general recruiting/careers inboxes")
 
 
 class ContactsOut(BaseModel):
@@ -78,6 +82,8 @@ STRICT RULES:
 - A person without an email is still useful if the source shows their name + recruiting role at this company
   (e.g. a LinkedIn result titled "Name - Talent Acquisition - {company}"). Give their linkedin_url if present.
 - works_at_company must be false unless the source clearly connects the contact to {company}.
+- relevant_to_role must be false when the source shows the contact recruiting for an unrelated function
+  (e.g. "hiring CA trainees for Accounting & Finance") — this job is a technical AI/ML role.
 - Max 8 contacts, most relevant first (India-based recruiters first).
 
 SOURCES:
@@ -110,9 +116,15 @@ class ContactFinder:
         self.gemini = gemini
         self.max_pages = max_pages
 
-    def _queries(self, company: str, domain: str | None) -> list[str]:
-        return [f"{company} HR recruiter email India careers",
-                f"{company} talent acquisition India LinkedIn"]
+    def _queries(self, company: str, domain: str | None, deep: bool = False) -> list[str]:
+        q = [f"{company} HR recruiter email India careers",
+             f"{company} talent acquisition India LinkedIn"]
+        if deep:   # where recruiter emails actually get published: hiring posts and "send your CV" lines
+            q += [f'"{company}" hiring "share your resume" OR "send your CV" OR "drop your CV" email',
+                  f"{company} recruiter hiring India email site:linkedin.com/posts",
+                  f"{company} careers email id HR recruitment contact" + (f" {domain}" if domain else ""),
+                  f'"{company}" "@{domain}" hiring resume' if domain else f'"{company}" HR email id for jobs India']
+        return q
 
     @staticmethod
     def _direct_pages(domain: str | None) -> list[str]:
@@ -122,21 +134,26 @@ class ContactFinder:
         return [f"{base}/careers", f"{base}/contact", f"{base}/contact-us", f"{base}/careers/"]
 
     def find(self, company: str, title: str, location: str, job_url: str, job_text: str,
-             domain_hint: str | None) -> tuple[list[FoundContact], str | None, list[str]]:
-        """Returns (contacts, company_domain, queries_used)."""
+             domain_hint: str | None, deep: bool = False) -> tuple[list[FoundContact], str | None, list[str]]:
+        """Returns (contacts, company_domain, queries_used). deep=True adds email-focused searches."""
         sources: list[Source] = []
         # Source 0: the job posting itself (emails printed in the JD are the most relevant)
         if job_text and EMAIL_RE.search(job_text):
             sources.append(Source(0, job_url, f"Job posting: {title}", "", _email_contexts(job_text), True))
         seen = {job_url}
-        queries = self._queries(company, domain_hint)
+        queries = self._queries(company, domain_hint, deep)
+        per_query = 12 if deep else 8
         for q in queries:
             try:
                 results = self.searx.search(q)
             except SearxError as e:
                 log.warning("%s", e)
                 continue
-            for r in results[:8]:
+            # results whose snippet already shows an email are always kept
+            results.sort(key=lambda r: not EMAIL_RE.search(r.snippet or ""))
+            for i, r in enumerate(results):
+                if i >= per_query and not EMAIL_RE.search(r.snippet or ""):
+                    break
                 if r.url in seen or is_data_broker(r.url):
                     continue
                 seen.add(r.url)
@@ -149,16 +166,22 @@ class ContactFinder:
             page = self.fetcher.fetch(u)
             if page.ok and EMAIL_RE.search(page.text):
                 sources.append(Source(len(sources), u, f"{company} official page", "", _email_contexts(page.text), True))
-        # Fetch a few promising, permitted pages from search results to look for published emails
-        fetched = 0
+        # Fetch promising, permitted pages from search results to look for published emails
+        fetched, limit = 0, (self.max_pages + 3 if deep else self.max_pages)
         cname = _norm(company).split(" ")[0] if company else ""
-        for s in sources:
-            if fetched >= self.max_pages:
+
+        def promise(s: Source) -> int:
+            blob = _norm(s.url + " " + s.title + " " + s.snippet)
+            score = 0
+            score += 3 if re.search(r"e-?mail|@|send (your )?(cv|resume)|share (your )?(cv|resume)", blob) else 0
+            score += 2 if (cname and cname in blob) or (domain_hint and domain_hint in s.url) else 0
+            score += 1 if re.search(r"career|job|contact|hr|recruit|hiring", blob) else 0
+            return score
+
+        for s in sorted(sources, key=promise, reverse=True):
+            if fetched >= limit:
                 break
-            if s.fetched or is_never_fetch(s.url):
-                continue
-            relevant = (cname and cname in _norm(s.url + s.title)) or (domain_hint and domain_hint in s.url)
-            if not relevant or not re.search(r"career|job|contact|hr|recruit|hiring|about", s.url + s.title, re.I):
+            if s.fetched or is_never_fetch(s.url) or promise(s) < 3:
                 continue
             page = self.fetcher.fetch(s.url)
             fetched += 1
@@ -219,6 +242,8 @@ class ContactFinder:
                 ed = email.split("@")[1]
                 dm = bool(domain and (ed == domain or ed.endswith("." + domain) or domain.endswith(ed)))
             kind = c.kind or "other"
+            if not c.relevant_to_role:
+                kind = "other_function"
             if src.sid == 0 and email and src.url == sources[0].url and sources[0].title.startswith("Job posting"):
                 kind = "job_post_contact"
             elif kind == "job_post_contact":      # only the posting itself can be a job-post contact

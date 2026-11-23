@@ -19,6 +19,8 @@ SENIOR_TITLE_RE = re.compile(
     r"\b(senior|sr\.?|staff|principal|lead|leader|head|director|manager|architect|vp|vice president|chief|"
     r"distinguished|fellow|expert|specialist ii|iii|iv|l5|l6|l7|e5|e6)\b", re.I)
 
+INTERN_RE = re.compile(r"\b(intern|internship|trainee|apprentice(ship)?)\b", re.I)
+
 MTS_RE = re.compile(r"member\s+(of\s+)?(the\s+)?technical\s+staff", re.I)
 
 NON_ENGINEERING_RE = re.compile(
@@ -46,6 +48,8 @@ def title_check(title: str) -> tuple[bool, str]:
         return False, "non-engineering role"
     if not RELEVANT_TITLE_RE.search(title):
         return False, "title not in AI/ML target family"
+    if INTERN_RE.search(title):
+        return False, "internship / trainee role"
     m = SENIOR_TITLE_RE.search(MTS_RE.sub("", title))
     if m:
         return False, f"senior-level title ('{m.group(0)}')"

@@ -31,3 +31,9 @@ def test_min_years():
     assert extract_min_years("Experience: 0 to 2 years")[0] == 0.0
     assert extract_min_years("Great team, 100 people, founded 10 years ago")[0] is None
     assert extract_min_years("")[0] is None
+
+
+def test_interns_rejected():
+    assert title_check("AI / Machine Learning Intern")[0] is False
+    assert title_check("Machine Learning Trainee")[0] is False
+    assert title_check("Internal Tools ML Engineer")[0] is True     # 'internal' is not 'intern'

@@ -89,9 +89,45 @@ class Worker:
         self.p.event("Discovery stopped.", "info")
 
 
+class EmailHunt:
+    """Background deep email search over all matches lacking an email (user-triggered, stoppable)."""
+
+    def __init__(self, pipeline: Pipeline):
+        self.p = pipeline
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.state = "idle"
+        self.result: str = ""
+
+    def start(self) -> None:
+        if self.thread and self.thread.is_alive():
+            return
+        self.stop_event.clear()
+        self.state, self.result = "running", ""
+        self.thread = threading.Thread(target=self._run, name="email-hunt", daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+
+    def _run(self) -> None:
+        try:
+            searched, found = self.p.find_missing_emails(self.stop_event)
+            self.result = f"{searched} searched, emails found for {found}"
+            self.state = "done"
+        except (QuotaExhausted, GeminiBusy) as e:
+            self.state, self.result = "paused", str(e)
+            self.p.event(f"Email search paused: {e}", "warn")
+        except Exception as e:
+            log.exception("Email hunt crashed")
+            self.state, self.result = "error", f"{type(e).__name__}: {e}"
+            self.p.event(f"Email search error: {e}", "error")
+
+
 class AppState:
     pipeline: Pipeline
     worker: Worker
+    hunt: EmailHunt
     gemini_info: dict
     gmail_info: dict
     searx_info: dict
@@ -136,6 +172,7 @@ def bootstrap(s: Settings) -> AppState:
     p.gmail_ready = g.ready
     st.pipeline = p
     st.worker = Worker(p)
+    st.hunt = EmailHunt(p)
     db.log_event("Dashboard started.")
     return st
 
@@ -163,6 +200,7 @@ def create_app(st: AppState) -> FastAPI:
         stats = db.stats()
         return {
             "worker": {"state": w.state, "message": w.message, "step": p.status_text, "last_report": w.last_report},
+            "email_hunt": {"state": st.hunt.state, "result": st.hunt.result},
             "gemini": st.gemini_info | {"models": p.gemini.model_status(), "calls": p.gemini.calls},
             "gmail": st.gmail_info, "searxng": st.searx_info | {"queries_run": p.searx.queries_run},
             "stats": stats, "daily_limit": p.s.daily_email_limit,
@@ -183,6 +221,16 @@ def create_app(st: AppState) -> FastAPI:
     @app.post("/api/discovery/stop")
     def stop():
         w.stop()
+        return {"ok": True}
+
+    @app.post("/api/contacts/find-missing")
+    def find_missing():
+        st.hunt.start()
+        return {"ok": True}
+
+    @app.post("/api/contacts/find-missing/stop")
+    def find_missing_stop():
+        st.hunt.stop()
         return {"ok": True}
 
     @app.get("/api/events")
@@ -211,7 +259,8 @@ def create_app(st: AppState) -> FastAPI:
             email = None
         if email:
             att = Path(email["attachment"])
-            email = email | {"attachment_name": att.name, "attachment_kb": att.stat().st_size // 1024
+            email = email | {"attachment_name": att.name, "attachment_sent_as": email.get("attachment_filename") or att.name,
+                             "attachment_kb": att.stat().st_size // 1024
                              if att.exists() else None}
         return {"job": job, "analysis": db.get_analysis(job_id), "contacts": db.get_recruiters(job_id),
                 "email": email, "resumes": list(p.resume.variants)}
@@ -230,11 +279,21 @@ def create_app(st: AppState) -> FastAPI:
         p.restore(job_id)
         return _job_detail(job_id)
 
+    @app.post("/api/jobs/{job_id}/reanalyse")
+    def reanalyse(job_id: int):
+        if not db.get_job(job_id):
+            raise HTTPException(404, "job not found")
+        try:
+            p.analyse(job_id)
+        except (QuotaExhausted, GeminiBusy) as e:
+            raise HTTPException(429, str(e))
+        return _job_detail(job_id)
+
     @app.post("/api/jobs/{job_id}/find-contacts")
     def find_contacts(job_id: int):
         try:
-            p.discover_contacts(job_id)
-        except QuotaExhausted as e:
+            p.discover_contacts(job_id, deep=True)
+        except (QuotaExhausted, GeminiBusy) as e:
             raise HTTPException(429, str(e))
         return _job_detail(job_id)
 
@@ -257,7 +316,7 @@ def create_app(st: AppState) -> FastAPI:
             raise HTTPException(400, "Job has not been analysed yet.")
         try:
             p.draft_email(job_id, rec, data.get("resume"))
-        except QuotaExhausted as e:
+        except (QuotaExhausted, GeminiBusy) as e:
             raise HTTPException(429, str(e))
         return _job_detail(job_id)
 

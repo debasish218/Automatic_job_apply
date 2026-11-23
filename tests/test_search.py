@@ -79,3 +79,16 @@ def test_malformed_urls_do_not_crash():
     assert host_of("http://[not-ipv6/careers") == ""
     assert company_domain_from_url("https://[broken") is None
     assert company_domain_from_url("https://www.zensar.com/careers") == "zensar.com"
+
+
+def test_other_function_recruiter_flagged_and_not_auto_selected():
+    from job_agent.pipeline import Pipeline
+    sources = [Source(0, "https://in.linkedin.com/posts/arjun", "Arjun Goel on LinkedIn",
+                      "CNH hiring CA Industrial Trainees - Accounting and Finance. mail at arjun.goel@cnh.com")]
+    out = ContactsOut(company_domain="cnh.com", contacts=[ContactOut(
+        name="Arjun Goel", designation="", email="arjun.goel@cnh.com", linkedin_url="", source_id=0,
+        evidence_quote="mail at arjun.goel@cnh.com", kind="recruiter", works_at_company=True, relevant_to_role=False)])
+    got = _finder()._validate(out, sources, "cnh.com")
+    assert got[0].kind == "other_function"
+    recs = [{"email": got[0].email, "kind": got[0].kind, "domain_match": 1, "verification": "search_snippet"}]
+    assert Pipeline.best_recipient(recs) is None

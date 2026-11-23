@@ -63,6 +63,7 @@ class Settings:
     queries_per_pass: int = 12
     query_cooldown_hours: float = 24.0          # don't repeat the same query within this window
     max_posting_age_days: int = 45
+    deep_email_search: bool = True              # extra email-focused searches when none found
     auto_draft: bool = True                     # draft an email automatically when a contact email is found
     web_port: int = 8765
 

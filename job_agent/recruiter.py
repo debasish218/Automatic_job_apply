@@ -21,6 +21,7 @@ EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 IRRELEVANT_LOCAL = re.compile(
     r"^(no-?reply|donotreply|privacy|dpo|gdpr|legal|security|abuse|support|help|info|press|media|"
     r"accommodations?|accessibility|disability|ada|investor|ir|billing|sales|compliance|ethics|"
+    r"accounts?|accounting|finance|payroll|invoices?|payments?|procurement|vendors?|purchase|marketing|"
     r"applicant-?privacy|data-?protection|.*accommodation.*|.*privacy.*)$", re.I)
 RECRUITING_LOCAL = re.compile(r"(career|job|hiring|hire|talent|recruit|hr|people|ta\b|campus)", re.I)
 

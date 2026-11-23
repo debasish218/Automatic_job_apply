@@ -8,6 +8,7 @@ def test_classification():
     assert classify("privacy@acme.com") is None
     assert classify("accommodations@acme.com") is None
     assert classify("noreply@acme.com") is None
+    assert classify("accounts@acme.com") is None and classify("payroll@acme.com") is None
 
 
 def test_extract_only_literal_emails():

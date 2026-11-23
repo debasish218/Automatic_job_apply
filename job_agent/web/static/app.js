@@ -62,12 +62,24 @@ async function refreshStatus() {
     stat(s.emails_sent || 0, "Emails sent") + stat(`${s.sent_today || 0}/${status.daily_limit}`, "Sent today") +
     stat(s.queries_run || 0, "Searches run") + stat(g.calls, "Gemini calls (session)");
   $("#c-matches").textContent = s.pending_review || "";
+  const h = status.email_hunt, hb = $("#btn-hunt");
+  hb.textContent = h.state === "running" ? "Stop email search" : "Find emails for matches without one";
+  hb.className = "btn small " + (h.state === "running" ? "danger" : "");
+  $("#hunt-status").textContent = h.state === "running" ? `Searching… ${status.worker.step || ""}`.replace("idle", "")
+    : h.result ? `Last email search: ${h.result}` : "";
   $("#c-sent").textContent = s.emailed || "";
 }
 
 $("#btn-run").addEventListener("click", async (e) => {
   const running = ["running", "waiting"].includes(status?.worker.state);
   await busy(e.currentTarget, running ? "Stopping" : "Starting", () => api(running ? "/api/discovery/stop" : "/api/discovery/start", { method: "POST" }));
+  refreshStatus();
+});
+
+$("#btn-hunt").addEventListener("click", async (e) => {
+  const running = status?.email_hunt.state === "running";
+  if (!running && !confirm("Search the web for recruiter / HR emails for every match without one?\nThis takes about 2 minutes per company (searches are slowed down to avoid being blocked).")) return;
+  await busy(e.currentTarget, running ? "Stopping" : "Starting", () => api(running ? "/api/contacts/find-missing/stop" : "/api/contacts/find-missing", { method: "POST" }));
   refreshStatus();
 });
 
@@ -99,6 +111,7 @@ $("#search").addEventListener("input", () => renderRows());
 let rows = [];
 async function loadList() {
   $("#search").parentElement.style.display = view === "activity" ? "none" : "";
+  $("#btn-hunt").style.display = $("#hunt-status").style.display = ["matches", "ready"].includes(view) ? "" : "none";
   if (view === "activity") return renderActivity();
   try {
     rows = view === "companies" ? await api("/api/companies") : await api(`/api/jobs?view=${view}`);
@@ -132,13 +145,16 @@ function renderRows() {
   el.innerHTML = `<table><thead><tr><th>Score</th><th>Role</th><th>Location</th><th>Experience</th><th>Source</th><th>Contacts</th><th>Status</th></tr></thead><tbody>${list
     .map((r) => {
       const st = r.email_status === "draft" ? '<span class="tag info">Draft ready</span>' : r.email_status === "sent" ? '<span class="tag good">Sent</span>'
-        : r.status === "pending_review" ? '<span class="tag warn">Needs contact</span>' : `<span class="tag">${esc(r.status.replace("_", " "))}</span>`;
+        : r.status === "pending_review" ? (r.emails_found ? '<span class="tag warn">Write email</span>'
+          : `<span class="tag warn">Needs contact</span> <button class="btn small" data-add="${r.id}">+ Add email</button>`)
+        : `<span class="tag">${esc(r.status.replace("_", " "))}</span>`;
       const reason = ["filtered_out", "duplicate", "error", "skipped"].includes(r.status) ? `<div class="sub">${esc(r.status_reason || "")}</div>` : "";
       return `<tr data-id="${r.id}"><td>${scoreBadge(r.score)}</td><td><b>${esc(r.title)}</b><div class="sub">${esc(r.company)}</div>${reason}</td>
         <td>${esc(r.location || "—")}</td><td class="sub">${esc((r.experience_req || "—").slice(0, 60))}</td><td><span class="tag">${esc(r.site || r.source)}</span></td>
         <td>${r.contacts ? `${r.contacts} <span class="sub">(${r.emails_found} email)</span>` : '<span class="sub">—</span>'}</td><td>${st}</td></tr>`;
     }).join("")}</tbody></table>`;
   el.querySelectorAll("tr[data-id]").forEach((tr) => tr.addEventListener("click", () => openJob(+tr.dataset.id)));
+  el.querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", (ev) => { ev.stopPropagation(); openJob(+b.dataset.add, true); }));
 }
 
 function renderActivity() {
@@ -154,10 +170,14 @@ function closeDrawer() { $("#drawer").classList.remove("open"); $("#scrim").clas
 $("#scrim").addEventListener("click", closeDrawer);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if ($("#modal").classList.contains("open")) closeModal(); else closeDrawer(); } });
 
-async function openJob(id) {
+async function openJob(id, focusAdd = false) {
   openDrawer();
   $("#drawer-body").innerHTML = '<div class="empty"><span class="spinner"></span> Loading…</div>';
-  try { renderJob(await api(`/api/jobs/${id}`)); } catch (e) { $("#drawer-body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  try {
+    renderJob(await api(`/api/jobs/${id}`));
+    const inp = $("#add-email");
+    if (focusAdd && inp) { inp.scrollIntoView({ behavior: "smooth", block: "center" }); inp.focus(); }
+  } catch (e) { $("#drawer-body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 
 const VERIF = {
@@ -174,21 +194,34 @@ function renderJob(d) {
     return `<div class="contact"><div>
         <b>${esc(c.name || (c.kind || "").replace("_", " ") || "Contact")}</b> <span class="sub">${esc(c.designation || "")}</span><br>
         ${c.email ? `<code>${esc(c.email)}</code> ` : '<span class="sub">no email published</span> '}${dm}
-        <span class="tag ${cls}">${esc(label)}</span> ${c.linkedin ? link(c.linkedin, "LinkedIn") : ""}
+        <span class="tag ${cls}">${esc(label)}</span> ${c.kind === "other_function" ? '<span class="tag bad" title="Their post/profile shows hiring for a different function">recruits for another function</span>' : ""} ${c.linkedin ? link(c.linkedin, "LinkedIn") : ""}
         <div class="evidence">“${esc(c.evidence || "")}” — ${link(c.source_url, "source")}</div></div>
       <div>${c.email && j.status !== "emailed" ? `<button class="btn small" data-use="${c.id}">Write email</button>` : ""}</div></div>`;
   }).join("") || '<div class="sub">No contacts found yet. Recruiter emails are rarely published — use “Find contacts”, add one you know, or apply via the posting.</div>';
 
+  const foundEmail = d.contacts.some((c) => c.email && c.verification !== "user_provided");
+  const canAdd = !foundEmail && !["emailed"].includes(j.status);
+  const addBox = canAdd ? `
+    <div class="card addbox"><b>No recruiter email found for this job.</b> If you know one (from LinkedIn, the company site, a referral…), add it here — Gemini will write the email for you to review and send.
+      <div class="row"><div><label>Recruiter email</label><input id="add-email" type="email" placeholder="name@company.com"></div><div><label>Name (optional)</label><input id="add-name" type="text" placeholder="e.g. Priya Rao"></div></div>
+      <label>Where you found it (optional)</label><input id="add-src" type="text" placeholder="LinkedIn profile / page URL">
+      <div class="d-actions"><button class="btn primary" id="btn-add-save">Add email &amp; write draft</button></div></div>` : "";
+  const recipientNote = (() => {
+    if (!e) return "";
+    const c = d.contacts.find((x) => x.email === e.recipient);
+    return c && c.verification !== "user_provided" ? "found by search — locked" : "added by you";
+  })();
   const skills = (arr, cls) => (arr || []).map((s) => `<span class="tag ${cls}">${esc(s)}</span>`).join("") || '<span class="sub">—</span>';
   const emailBlock = e ? `
     <div class="card">
-      <div class="row"><div><label>To</label><input id="em-to" type="email" value="${esc(e.recipient)}" ${e.status !== "draft" ? "disabled" : ""}></div>
+      <div class="row"><div><label>To <span class="sub">(${esc(recipientNote)})</span></label><div class="locked" title="The recipient can't be edited. Use “Write email” on another contact to change it.">🔒 ${esc(e.recipient)}</div></div>
         <div><label>Attach resume</label><select id="em-resume" ${e.status !== "draft" ? "disabled" : ""}>${d.resumes.map((r) => `<option ${e.attachment_name === r ? "selected" : ""}>${esc(r)}</option>`).join("")}</select></div></div>
       <label>Subject</label><input id="em-subject" type="text" value="${esc(e.subject)}" ${e.status !== "draft" ? "disabled" : ""}>
+      <div class="sub" style="margin-top:6px">Attachment will be sent as <b>${esc(e.attachment_sent_as)}</b></div>
       <label>Body</label><textarea id="em-body" ${e.status !== "draft" ? "disabled" : ""}>${esc(e.body)}</textarea>
       <div class="sub" style="margin-top:6px">Status: <b>${esc(e.status)}</b>${e.sent_at ? ` · sent ${esc(e.sent_at)}` : ""}${e.model ? ` · written by ${esc(e.model)}` : ""}${e.error ? ` · <span style="color:var(--bad)">last error: ${esc(e.error)}</span>` : ""}</div>
       ${e.status === "draft" ? `<div class="d-actions"><button class="btn good" id="btn-approve">Review &amp; send…</button><button class="btn" id="btn-save">Save edits</button><button class="btn" id="btn-regen">Rewrite with Gemini</button></div>` : ""}
-    </div>` : `<div class="sub">No email yet. ${d.contacts.some((c) => c.email) ? "Pick a contact above and press “Write email”." : "Add or find a contact with an email first."}</div>`;
+    </div>` : `<div class="sub">No email yet. ${d.contacts.some((c) => c.email) ? "Pick a contact above and press “Write email”." : "Add a recruiter email above (or search the web) to write one."}</div>`;
 
   $("#drawer-body").innerHTML = `
     <div class="d-head"><div><h2>${esc(j.title)}</h2><div><b>${esc(j.company)}</b> · ${esc(j.location || "—")}</div>
@@ -196,6 +229,7 @@ function renderJob(d) {
       <button class="close" id="btn-close" aria-label="Close">×</button></div>
     <div class="d-actions">${link(j.url, "Open job posting ↗")}
       ${j.status === "skipped" || j.status === "filtered_out" ? '<button class="btn small" id="btn-restore">Move to matches</button>' : j.status !== "emailed" ? '<button class="btn small" id="btn-skip">Skip this job</button>' : ""}
+      <button class="btn small" id="btn-reanalyse" title="Score this job again with Gemini using the current rules">Re-analyse</button>
       <span class="tag">${esc(j.status.replace("_", " "))}</span><span class="sub">${esc(j.status_reason || "")}</span></div>
 
     ${a ? `<div class="section"><h3>Resume match</h3><div class="grid2">
@@ -207,10 +241,8 @@ function renderJob(d) {
       <div class="k">Why</div><div>${esc(a.reasoning)}</div>
       <div class="k">Best resume</div><div>${esc(a.best_resume)}</div></div></div>` : `<div class="section"><div class="sub">Not analysed.</div></div>`}
 
-    <div class="section"><h3>Recruiter &amp; contacts</h3>${contacts}
-      <div class="d-actions"><button class="btn small" id="btn-find">Find contacts again</button><button class="btn small" id="btn-add">Add contact manually</button></div>
-      <div id="add-form" style="display:none" class="card"><div class="row"><div><label>Email</label><input id="add-email" type="email" placeholder="name@company.com"></div><div><label>Name (optional)</label><input id="add-name" type="text"></div></div>
-        <label>Where you found it (optional URL)</label><input id="add-src" type="text"><div class="d-actions"><button class="btn primary small" id="btn-add-save">Add &amp; write email</button></div></div></div>
+    <div class="section"><h3>Recruiter &amp; contacts</h3>${addBox}${contacts}
+      ${j.status !== "emailed" ? '<div class="d-actions"><button class="btn small" id="btn-find">Search web for emails</button></div>' : ""}</div>
 
     <div class="section"><h3>Email</h3>${emailBlock}</div>
 
@@ -221,8 +253,8 @@ function renderJob(d) {
   const act = (sel, label, fn) => { const b = $(sel); if (b) b.onclick = () => busy(b, label, fn); };
   act("#btn-skip", "Skipping", async () => { renderJob(await api(`/api/jobs/${j.id}/skip`, { method: "POST" })); loadList(); refreshStatus(); });
   act("#btn-restore", "Restoring", async () => { renderJob(await api(`/api/jobs/${j.id}/restore`, { method: "POST" })); loadList(); refreshStatus(); });
-  act("#btn-find", "Searching (this takes ~1 min)", async () => { renderJob(await api(`/api/jobs/${j.id}/find-contacts`, { method: "POST" })); loadList(); });
-  $("#btn-add").onclick = () => { const f = $("#add-form"); f.style.display = f.style.display === "none" ? "" : "none"; };
+  act("#btn-reanalyse", "Re-analysing", async () => { renderJob(await api(`/api/jobs/${j.id}/reanalyse`, { method: "POST" })); loadList(); refreshStatus(); });
+  act("#btn-find", "Deep email search (~2 min)", async () => { renderJob(await api(`/api/jobs/${j.id}/find-contacts`, { method: "POST" })); loadList(); });
   act("#btn-add-save", "Adding", async () => {
     let r = await api(`/api/jobs/${j.id}/contacts`, { method: "POST", body: { email: $("#add-email").value, name: $("#add-name").value, source: $("#add-src").value } });
     const c = r.contacts.find((x) => x.email === $("#add-email").value.trim().toLowerCase());
@@ -233,7 +265,7 @@ function renderJob(d) {
     renderJob(await api(`/api/jobs/${j.id}/draft`, { method: "POST", body: { contact_id: +b.dataset.use, resume: $("#em-resume")?.value } }));
     loadList();
   })));
-  const edits = () => ({ recipient: $("#em-to").value, subject: $("#em-subject").value, body: $("#em-body").value, resume: $("#em-resume").value });
+  const edits = () => ({ recipient: e.recipient, subject: $("#em-subject").value, body: $("#em-body").value, resume: $("#em-resume").value });
   act("#btn-save", "Saving", async () => { renderJob(await api(`/api/emails/${e.id}`, { method: "PUT", body: edits() })); toast("Draft saved"); });
   act("#btn-regen", "Rewriting", async () => {
     const c = d.contacts.find((x) => x.email === e.recipient);
@@ -260,7 +292,7 @@ function confirmSend(d) {
       <div class="k">Recruiter</div><div>${esc(e.recruiter_name || "Hiring Team")}</div>
       <div class="k">Role</div><div>${esc(j.title)} — ${esc(j.company)}</div>
       <div class="k">Subject</div><div>${esc(e.subject)}</div>
-      <div class="k">Attachment</div><div>📎 ${esc(e.attachment_name)} ${e.attachment_kb != null ? `(${e.attachment_kb} KB)` : '<span class="tag bad">missing</span>'}</div>
+      <div class="k">Attachment</div><div>📎 ${esc(e.attachment_sent_as)} <span class="sub">(from ${esc(e.attachment_name)})</span> ${e.attachment_kb != null ? `(${e.attachment_kb} KB)` : '<span class="tag bad">missing</span>'}</div>
       <div class="k">From</div><div>${esc(status?.gmail.account || "—")}</div>
     </div>
     <label>Email body (exactly what will be sent)</label><div class="mail-preview">${esc(e.body)}</div>
