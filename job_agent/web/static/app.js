@@ -42,6 +42,10 @@ let currentJob = null;
 async function refreshStatus() {
   try { status = await api("/api/status"); } catch { return; }
   const s = status.stats, g = status.gemini, gm = status.gmail, sx = status.searxng, w = status.worker;
+  const sb = $("#sync-banner"), sy = status.sync || {};
+  sb.hidden = !(sy.enabled && (sy.read_only || /could not/i.test(sy.message || "")));
+  sb.textContent = sy.message || "";
+  sb.className = "banner" + (sy.read_only ? " bad" : "");
   $("#profile-line").textContent = `${status.profile.name} · ${status.profile.experience} · ${status.profile.resumes.length} resume versions`;
   const avail = g.models.filter((m) => m.available).length;
   const pill = (cls, text, title = "") => `<span class="pill ${cls}" title="${esc(title)}"><span class="dot"></span>${esc(text)}</span>`;
@@ -176,7 +180,7 @@ function renderRows() {
   }
   el.innerHTML = `<table><thead><tr><th>Score</th><th>Role</th><th>Location</th><th>Experience</th><th>Source</th><th>Contacts</th><th>Status</th></tr></thead><tbody>${list
     .map((r) => {
-      const st = r.email_status === "draft" ? '<span class="tag info">Draft ready</span>' : r.email_status === "sent" ? '<span class="tag good">Sent</span>'
+      const st = r.email_status === "draft" ? '<span class="tag info">Draft ready</span>' : r.email_status === "gmail_draft" ? '<span class="tag info">In Gmail drafts</span>' : r.email_status === "sent" ? '<span class="tag good">Sent</span>'
         : r.status === "pending_review" ? (r.emails_found ? '<span class="tag warn">Write email</span>'
           : `<span class="tag warn">Needs contact</span> <button class="btn small" data-add="${r.id}">+ Add email</button>`)
         : `<span class="tag">${esc(r.status.replace("_", " "))}</span>`;
@@ -262,6 +266,7 @@ function renderJob(d) {
       <div class="sub" style="margin-top:6px">Attachment will be sent as <b>${esc(e.attachment_sent_as)}</b></div>
       <label>Body</label><textarea id="em-body" ${e.status !== "draft" ? "disabled" : ""}>${esc(e.body)}</textarea>
       <div class="sub" style="margin-top:6px">Status: <b>${esc(e.status)}</b>${e.sent_at ? ` · sent ${esc(e.sent_at)}` : ""}${e.model ? ` · written by ${esc(e.model)}` : ""}${e.error ? ` · <span style="color:var(--bad)">last error: ${esc(e.error)}</span>` : ""}</div>
+      ${e.status === "gmail_draft" ? '<div class="sub" style="margin-top:6px">✉ This email is in your <b>Gmail Drafts</b> (created by the daily run) — review it and press Send in Gmail.</div>' : ""}
       ${e.status === "draft" ? `<div class="d-actions"><button class="btn good" id="btn-approve">Review &amp; send…</button><button class="btn" id="btn-save">Save edits</button><button class="btn" id="btn-regen">Rewrite with Gemini</button></div>` : ""}
     </div>` : `<div class="sub">No email yet. ${d.contacts.some((c) => c.email) ? "Pick a contact above and press “Write email”." : "Add a recruiter email above (or search the web) to write one."}</div>`;
 
@@ -337,7 +342,7 @@ function renderStartupRows(list) {
   }
   el.innerHTML = intro + `<table><thead><tr><th>Score</th><th>Startup</th><th>Origin</th><th>Round</th><th>Funded</th><th>Contacts</th><th>Status</th></tr></thead><tbody>${list
     .map((r) => {
-      const st = r.email_status === "draft" ? '<span class="tag info">Draft ready</span>' : r.email_status === "sent" ? '<span class="tag good">Sent</span>'
+      const st = r.email_status === "draft" ? '<span class="tag info">Draft ready</span>' : r.email_status === "gmail_draft" ? '<span class="tag info">In Gmail drafts</span>' : r.email_status === "sent" ? '<span class="tag good">Sent</span>'
         : r.status === "pending_review" ? (r.emails_found ? '<span class="tag warn">Write email</span>' : `<span class="tag warn">Needs contact</span> <button class="btn small" data-sadd="${r.id}">+ Add email</button>`)
         : `<span class="tag">${esc(r.status.replace("_", " "))}</span>`;
       const reason = ["filtered_out", "skipped", "new"].includes(r.status) ? `<div class="sub">${esc(r.status_reason || "")}</div>` : "";
@@ -385,6 +390,7 @@ function renderStartup(d) {
       <div class="sub" style="margin-top:6px">Attachment will be sent as <b>${esc(e.attachment_sent_as)}</b></div>
       <label>Body</label><textarea id="em-body" ${e.status !== "draft" ? "disabled" : ""}>${esc(e.body)}</textarea>
       <div class="sub" style="margin-top:6px">Status: <b>${esc(e.status)}</b>${e.sent_at ? ` · sent ${esc(e.sent_at)}` : ""}${e.model ? ` · written by ${esc(e.model)}` : ""}${e.error ? ` · <span style="color:var(--bad)">last error: ${esc(e.error)}</span>` : ""}</div>
+      ${e.status === "gmail_draft" ? '<div class="sub" style="margin-top:6px">✉ This email is in your <b>Gmail Drafts</b> (created by the daily run) — review it and press Send in Gmail.</div>' : ""}
       ${e.status === "draft" ? `<div class="d-actions"><button class="btn good" id="btn-approve">Review &amp; send…</button><button class="btn" id="btn-save">Save edits</button><button class="btn" id="btn-regen">Rewrite with Gemini</button></div>` : ""}
     </div>` : `<div class="sub">No email yet. ${!f ? "Score this startup first (“Re-score”)." : d.contacts.some((c) => c.email) ? "Pick a contact above and press “Write email”." : "Add an email above (or search the web) to write one."}</div>`;
 

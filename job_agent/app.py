@@ -12,6 +12,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--gmail-auth", action="store_true", help="one-time Gmail OAuth login, then exit")
     ap.add_argument("--check-search", action="store_true", help="check SearXNG is running and returns results")
     ap.add_argument("--stats", action="store_true", help="print tracking database statistics")
+    ap.add_argument("--daily", action="store_true",
+                    help="headless daily run: search, then put drafts in Gmail Drafts and email you a summary "
+                         "(never sends to recruiters)")
     args = ap.parse_args(argv)
     s = load_settings()
     setup_logging(s.log_dir)
@@ -35,5 +38,8 @@ def main(argv: list[str] | None = None) -> None:
     if not s.gemini_api_key:
         print("✖ GEMINI_API_KEY not found in .env / environment. Execution stopped.")
         raise SystemExit(1)
+    if args.daily:
+        from .daily import run_daily
+        raise SystemExit(run_daily(s))
     from .web.server import serve
     serve(s)

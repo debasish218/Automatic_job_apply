@@ -1,0 +1,6 @@
+# .gitignore for the PRIVATE data repo
+code/
+credentials/
+*.db-wal
+*.db-shm
+.env

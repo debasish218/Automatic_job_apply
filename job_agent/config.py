@@ -72,6 +72,10 @@ class Settings:
     funding_queries_per_scan: int = 8           # funding-news searches per "Find funded startups" run
     funding_max_articles: int = 12              # news articles read with Gemini per run (quota friendly)
 
+    # Daily headless run (python run.py --daily, e.g. on GitHub Actions) and laptop data sync
+    daily_run_minutes: int = 35                 # time budget for discovery/contacts/drafting in one daily run
+    data_repo: Path | None = None               # git clone holding data/ (DATA_REPO_SYNC); None = no sync
+
 
 def load_settings(env_file: Path | None = None) -> Settings:
     load_dotenv(env_file or PROJECT_ROOT / ".env")
@@ -85,8 +89,18 @@ def load_settings(env_file: Path | None = None) -> Settings:
     s.queries_per_pass = _int("QUERIES_PER_PASS", s.queries_per_pass)
     s.web_port = _int("WEB_PORT", s.web_port)
     s.funding_window_days = _int("FUNDING_WINDOW_DAYS", s.funding_window_days)
+    s.daily_run_minutes = _int("DAILY_RUN_MINUTES", s.daily_run_minutes)
+    if os.getenv("DATA_DIR"):                   # e.g. a private data repo: <clone>/data
+        data_dir = Path(os.environ["DATA_DIR"]).expanduser().resolve()
+        s.db_path, s.cache_dir = data_dir / "jobs.db", data_dir / "cache"
+    if os.getenv("RESUMES_DIR"):
+        s.resumes_dir = Path(os.environ["RESUMES_DIR"]).expanduser().resolve()
     if os.getenv("JOB_AGENT_DB"):
         s.db_path = Path(os.environ["JOB_AGENT_DB"])
+    sync = (os.getenv("DATA_REPO_SYNC") or "").strip()
+    if sync and sync.lower() not in ("0", "false", "no"):
+        # "1" = the git repository that contains the data directory; otherwise a path inside the clone
+        s.data_repo = s.db_path.parent if sync.lower() in ("1", "true", "yes") else Path(sync).expanduser().resolve()
     for d in (s.db_path.parent, s.cache_dir, s.log_dir, s.gmail_credentials.parent):
         d.mkdir(parents=True, exist_ok=True)
     return s

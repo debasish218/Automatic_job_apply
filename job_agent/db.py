@@ -175,12 +175,21 @@ MIGRATIONS = {
              ("contacts_searched", "TEXT")],
     "recruiters": [("evidence", "TEXT"), ("kind", "TEXT"), ("domain_match", "INTEGER")],
     "analyses": [("model", "TEXT")],
-    "emails": [("model", "TEXT"), ("attachment_filename", "TEXT")],
+    "emails": [("model", "TEXT"), ("attachment_filename", "TEXT"), ("gmail_draft_id", "TEXT"),
+               ("gmail_thread_id", "TEXT")],
+    "startup_emails": [("gmail_draft_id", "TEXT"), ("gmail_thread_id", "TEXT")],
 }
 
 # Job statuses
 NEW, FILTERED, ANALYZED, PENDING, SKIPPED, EMAILED, DUPLICATE, ERROR = (
     "new", "filtered_out", "analyzed", "pending_review", "skipped", "emailed", "duplicate", "error")
+
+# Email statuses used by the daily run: the draft was put in the user's Gmail Drafts folder (the user sends it
+# from Gmail), or the user deleted that Gmail draft.
+GMAIL_DRAFT, DISCARDED = "gmail_draft", "discarded"
+# Emails that count as "already contacted" for duplicate protection (a Gmail draft is about to be sent).
+CONTACTED_SQL = "('sent', 'gmail_draft')"
+EMAIL_TABLES = ("emails", "startup_emails")
 
 
 def now() -> str:
@@ -337,13 +346,16 @@ class Database:
 
     def duplicate_send_reason(self, job_id: int, recipient: str, company: str, window_days: int) -> str | None:
         """Return a reason string if sending would be a duplicate, else None."""
-        r = self.conn.execute("SELECT id FROM emails WHERE job_id=? AND status='sent'", (job_id,)).fetchone()
+        r = self.conn.execute(f"SELECT id, status FROM emails WHERE job_id=? AND status IN {CONTACTED_SQL}",
+                              (job_id,)).fetchone()
         if r:
-            return f"an email for this job was already sent (email #{r['id']})"
+            return (f"an email for this job was already sent (email #{r['id']})" if r["status"] == "sent"
+                    else f"an email for this job is already in your Gmail drafts (email #{r['id']})")
         since = (datetime.now() - timedelta(days=window_days)).isoformat(timespec="seconds")
         r = self.conn.execute(
-            """SELECT e.id, j.title FROM emails e JOIN jobs j ON j.id=e.job_id
-               WHERE e.status='sent' AND e.recipient=? AND lower(j.company)=lower(?) AND e.sent_at>=?""",
+            f"""SELECT e.id, j.title FROM emails e JOIN jobs j ON j.id=e.job_id
+               WHERE e.status IN {CONTACTED_SQL} AND e.recipient=? AND lower(j.company)=lower(?)
+               AND COALESCE(e.sent_at, e.created_at)>=?""",
             (recipient.lower(), company, since)).fetchone()
         if r:
             return (f"{recipient} was already emailed about '{r['title']}' at {company} in the last "
@@ -359,17 +371,56 @@ class Database:
     def recipient_recently_emailed(self, recipient: str, window_days: int) -> str | None:
         """Any email (job or startup) already sent to this address within the window."""
         since = (datetime.now() - timedelta(days=window_days)).isoformat(timespec="seconds")
-        r = self.conn.execute("""SELECT e.id, j.company FROM emails e JOIN jobs j ON j.id=e.job_id
-                                 WHERE e.status='sent' AND e.recipient=? AND e.sent_at>=?""",
+        r = self.conn.execute(f"""SELECT e.id, j.company FROM emails e JOIN jobs j ON j.id=e.job_id
+                                  WHERE e.status IN {CONTACTED_SQL} AND e.recipient=?
+                                  AND COALESCE(e.sent_at, e.created_at)>=?""",
                               (recipient.lower(), since)).fetchone()
         if r:
             return f"{recipient} was already emailed about a job at {r['company']} (email #{r['id']})"
-        r = self.conn.execute("""SELECT e.id, s.name FROM startup_emails e JOIN startups s ON s.id=e.startup_id
-                                 WHERE e.status='sent' AND e.recipient=? AND e.sent_at>=?""",
+        r = self.conn.execute(f"""SELECT e.id, s.name FROM startup_emails e JOIN startups s ON s.id=e.startup_id
+                                  WHERE e.status IN {CONTACTED_SQL} AND e.recipient=?
+                                  AND COALESCE(e.sent_at, e.created_at)>=?""",
                               (recipient.lower(), since)).fetchone()
         if r:
             return f"{recipient} was already emailed about {r['name']} (startup email #{r['id']})"
         return None
+
+    def pending_gmail_drafts(self) -> int:
+        """Drafts waiting in the user's Gmail Drafts folder (they count against the daily limit)."""
+        return sum(self.conn.execute(f"SELECT COUNT(*) FROM {t} WHERE status=?", (GMAIL_DRAFT,)).fetchone()[0]
+                   for t in EMAIL_TABLES)
+
+    def gmail_draft_rows(self) -> list[tuple[str, dict]]:
+        """(table, email row) for every email currently sitting in Gmail Drafts."""
+        return [(t, dict(r)) for t in EMAIL_TABLES for r in self.conn.execute(
+            f"SELECT * FROM {t} WHERE status=? AND gmail_draft_id IS NOT NULL ORDER BY id", (GMAIL_DRAFT,))]
+
+    def update_email_row(self, table: str, email_id: int, **fields: Any) -> None:
+        if table not in EMAIL_TABLES:
+            raise ValueError(table)
+        self.conn.execute(f"UPDATE {table} SET {', '.join(f'{k}=?' for k in fields)} WHERE id=?",
+                          (*fields.values(), email_id))
+        self.conn.commit()
+
+    def local_drafts(self) -> list[dict]:
+        """Local drafts (not yet in Gmail) for good matches, best score first. Each row has 'table', 'kind',
+        'name' (company / startup), 'role', 'score', 'link'."""
+        rows = [dict(r) | {"table": "emails", "kind": "job"} for r in self.conn.execute(
+            """SELECT e.*, j.company AS name, j.title AS role, a.score, j.url AS link, j.location AS place
+               FROM emails e JOIN jobs j ON j.id=e.job_id LEFT JOIN analyses a ON a.job_id=j.id
+               WHERE e.status='draft' AND j.status=?""", (PENDING,))]
+        rows += [dict(r) | {"table": "startup_emails", "kind": "startup"} for r in self.conn.execute(
+            """SELECT e.*, s.name AS name, COALESCE(s.funding_round, '') || ' · ' || COALESCE(s.amount, '') AS role,
+                      s.score, COALESCE(s.website, s.source_url) AS link, s.hq_city AS place
+               FROM startup_emails e JOIN startups s ON s.id=e.startup_id
+               WHERE e.status='draft' AND s.status=?""", (PENDING,))]
+        rows.sort(key=lambda r: (-(r["score"] or 0), r["id"]))
+        return rows
+
+    def checkpoint(self) -> None:
+        """Fold the WAL into the main database file (before committing it to git)."""
+        self.conn.commit()
+        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def job_exists(self, external_id: str) -> bool:
         return self.conn.execute("SELECT 1 FROM jobs WHERE external_id=?", (external_id,)).fetchone() is not None

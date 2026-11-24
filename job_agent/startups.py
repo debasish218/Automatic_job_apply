@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import db as dbm
 from .gemini_client import GeminiBusy
-from .pipeline import Pipeline, QuotaExhausted, SendResult
+from .pipeline import Pipeline, QuotaExhausted, SendResult, resolve_attachment
 from .recruiter import USER_PROVIDED, is_valid_email
 from .search.funding import (FUNDING_QUERIES, DealCandidate, check_deal, domain_from_website, extract_deals,
                              norm_round, verified_evidence)
@@ -366,7 +366,7 @@ class StartupPipeline:
         e = self.db.latest_startup_email(startup_id)
         recs = self.db.get_startup_contacts(startup_id)
         rec = best_startup_recipient(recs)
-        if e and e["status"] == "sent":
+        if e and e["status"] in ("sent", dbm.GMAIL_DRAFT):
             return e
         if e and e["status"] == "draft":
             current = next((r for r in recs if r["email"] == e["recipient"]), None)
@@ -391,6 +391,8 @@ class StartupPipeline:
             d = self.p._gemini(write_outreach, self.p.gemini, self.p.resume, st, fit, self.s.candidate_experience,
                                contact.get("name"))
             prev = self.db.latest_startup_email(startup_id)
+            if prev and prev["status"] == dbm.GMAIL_DRAFT:
+                raise ValueError("This email is already in your Gmail Drafts — edit, send or delete it in Gmail.")
             if prev and prev["status"] == "draft":
                 self.db.update_startup_email(prev["id"], status="replaced")
             eid = self.db.save_startup_email(startup_id, contact["email"], contact.get("name"), d.subject, d.body,
@@ -414,17 +416,17 @@ class StartupPipeline:
         return self.db.get_startup_email(email_id)
 
     def duplicate_reason(self, st: dict, recipient: str) -> str | None:
-        r = self.db.conn.execute("SELECT id FROM startup_emails WHERE startup_id=? AND status='sent'",
+        r = self.db.conn.execute(f"SELECT id FROM startup_emails WHERE startup_id=? AND status IN {dbm.CONTACTED_SQL}",
                                  (st["id"],)).fetchone()
         if r:
-            return f"{st['name']} was already emailed (startup email #{r['id']})"
+            return f"{st['name']} was already emailed or is in your Gmail drafts (startup email #{r['id']})"
         dup = self.db.recipient_recently_emailed(recipient, self.s.duplicate_window_days)
         if dup:
             return dup
         key = dbm.company_key(st["name"])
         for j in self.db.conn.execute(
-                "SELECT j.company, e.id FROM emails e JOIN jobs j ON j.id=e.job_id WHERE e.status='sent' "
-                "AND e.sent_at>=date('now', ?)", (f"-{self.s.duplicate_window_days} days",)):
+                f"SELECT j.company, e.id FROM emails e JOIN jobs j ON j.id=e.job_id WHERE e.status IN "
+                f"{dbm.CONTACTED_SQL} AND COALESCE(e.sent_at, e.created_at)>=date('now', ?)", (f"-{self.s.duplicate_window_days} days",)):
             if dbm.company_key(j["company"]) == key:
                 return f"you already applied to a job at {j['company']} recently (email #{j['id']})"
         return None
@@ -436,6 +438,8 @@ class StartupPipeline:
         st = self.db.get_startup(e["startup_id"])
         if e["status"] == "sent":
             return SendResult(False, "This email was already sent.")
+        if e["status"] == dbm.GMAIL_DRAFT:
+            return SendResult(False, "This email is in your Gmail Drafts — send it from Gmail.")
         if e["status"] != "draft":
             return SendResult(False, f"Email is '{e['status']}', not a draft.")
         if not self.p.gmail or not self.p.gmail_ready:
@@ -445,7 +449,7 @@ class StartupPipeline:
             return SendResult(False, f"Blocked duplicate: {dup}")
         if self.db.sent_today() >= self.s.daily_email_limit:
             return SendResult(False, f"Daily limit of {self.s.daily_email_limit} emails reached. Nothing sent.")
-        att = Path(e["attachment"])
+        att = resolve_attachment(e["attachment"], self.s.resumes_dir)
         if not att.exists():
             return SendResult(False, f"Attachment missing: {att}")
         self.db.update_startup_email(email_id, status="approved")

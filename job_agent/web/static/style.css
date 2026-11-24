@@ -131,3 +131,6 @@ textarea { min-height: 300px; resize: vertical; line-height: 1.5; }
 .list-head select { width: auto; }
 .s-intro { padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; background: var(--surface-2); }
 .region { font-size: 11px; }
+.banner { margin: 10px 16px 0; padding: 10px 14px; border-radius: 8px; background: var(--warn-bg); color: var(--warn);
+  font-weight: 600; font-size: 13px; } .banner.bad { background: var(--bad-bg); color: var(--bad); }
+.banner[hidden] { display: none; }

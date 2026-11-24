@@ -24,6 +24,16 @@ from .search.searx import SearxClient, SearxError, SearchResult
 log = logging.getLogger(__name__)
 
 
+def resolve_attachment(stored: str, resumes_dir: Path) -> Path:
+    """Attachment paths are stored as absolute paths of the machine that drafted the email. When the database
+    moves between machines (laptop <-> daily cloud run), find the same resume file in this machine's folder."""
+    p = Path(stored)
+    if p.exists():
+        return p
+    local = resumes_dir / p.name
+    return local if local.exists() else p
+
+
 class QuotaExhausted(RuntimeError):
     """All Gemini models are out of free quota for today."""
 
@@ -334,7 +344,7 @@ class Pipeline:
         if not self.s.auto_draft:
             return None
         e = self.db.latest_email_for_job(job_id)
-        if e and e["status"] in ("draft", "sent"):
+        if e and e["status"] in ("draft", "sent", dbm.GMAIL_DRAFT):
             return e
         rec = self.best_recipient(self.db.get_recruiters(job_id))
         return self.draft_email(job_id, rec) if rec else None
@@ -351,6 +361,8 @@ class Pipeline:
             d = self._gemini(write_email, self.gemini, self.resume, job, m, self.s.candidate_experience,
                              recruiter.get("name"))
             prev = self.db.latest_email_for_job(job_id)
+            if prev and prev["status"] == dbm.GMAIL_DRAFT:
+                raise ValueError("This email is already in your Gmail Drafts — edit, send or delete it in Gmail.")
             if prev and prev["status"] == "draft":
                 self.db.update_email(prev["id"], status="replaced")
             attachment = str(self.resume.variants[m.best_resume].path)
@@ -373,6 +385,19 @@ class Pipeline:
                              attachment=str(self.resume.variants[attachment_key].path))
         return self.db.get_email(email_id)
 
+    def duplicate_reason(self, job: dict, recipient: str) -> str | None:
+        """Why emailing this recipient about this job would be a duplicate (sent emails and Gmail drafts count)."""
+        dup = self.db.duplicate_send_reason(job["id"], recipient, job["company"], self.s.duplicate_window_days)
+        if not dup:
+            r = self.db.conn.execute(
+                "SELECT e.id, s.name FROM startup_emails e JOIN startups s ON s.id=e.startup_id "
+                f"WHERE e.status IN {dbm.CONTACTED_SQL} AND e.recipient=? "
+                "AND COALESCE(e.sent_at, e.created_at)>=date('now', ?)",
+                (recipient.lower(), f"-{self.s.duplicate_window_days} days")).fetchone()
+            if r:
+                dup = f"{recipient} was already emailed about {r['name']} (startup email #{r['id']})"
+        return dup
+
     def send(self, email_id: int) -> SendResult:
         e = self.db.get_email(email_id)
         if not e:
@@ -380,23 +405,18 @@ class Pipeline:
         job = self.db.get_job(e["job_id"])
         if e["status"] == "sent":
             return SendResult(False, "This email was already sent.")
+        if e["status"] == dbm.GMAIL_DRAFT:
+            return SendResult(False, "This email is in your Gmail Drafts — send it from Gmail.")
         if e["status"] != "draft":
             return SendResult(False, f"Email is '{e['status']}', not a draft.")
         if not self.gmail or not self.gmail_ready:
             return SendResult(False, "Gmail is not authenticated — nothing sent. Run: python run.py --gmail-auth")
-        dup = self.db.duplicate_send_reason(job["id"], e["recipient"], job["company"], self.s.duplicate_window_days)
-        if not dup:
-            r = self.db.conn.execute(
-                "SELECT e.id, s.name FROM startup_emails e JOIN startups s ON s.id=e.startup_id "
-                "WHERE e.status='sent' AND e.recipient=? AND e.sent_at>=date('now', ?)",
-                (e["recipient"], f"-{self.s.duplicate_window_days} days")).fetchone()
-            if r:
-                dup = f"{e['recipient']} was already emailed about {r['name']} (startup email #{r['id']})"
+        dup = self.duplicate_reason(job, e["recipient"])
         if dup:
             return SendResult(False, f"Blocked duplicate: {dup}")
         if self.db.sent_today() >= self.s.daily_email_limit:
             return SendResult(False, f"Daily limit of {self.s.daily_email_limit} emails reached. Nothing sent.")
-        att = Path(e["attachment"])
+        att = resolve_attachment(e["attachment"], self.s.resumes_dir)
         if not att.exists():
             return SendResult(False, f"Attachment missing: {att}")
         self.db.update_email(email_id, status="approved")

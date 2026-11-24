@@ -16,7 +16,8 @@ from .. import db as dbm
 from ..config import PROJECT_ROOT, Settings
 from ..gemini_client import GeminiBusy, GeminiClient
 from ..gmail_client import GmailClient
-from ..pipeline import Pipeline, QuotaExhausted
+from ..datasync import DataRepo, SyncState
+from ..pipeline import Pipeline, QuotaExhausted, resolve_attachment
 from ..resume import load_resume_bundle
 from ..search.fetch import PageFetcher
 from ..search.searx import SearxClient, ensure_running
@@ -181,6 +182,8 @@ class AppState:
     gemini_info: dict
     gmail_info: dict
     searx_info: dict
+    sync: SyncState
+    repo: DataRepo | None
 
 
 def bootstrap(s: Settings) -> AppState:
@@ -190,6 +193,12 @@ def bootstrap(s: Settings) -> AppState:
     except AttributeError:
         pass
     st = AppState()
+    st.sync, st.repo = SyncState(), None
+    if s.data_repo:                                  # pull the cloud run's database before opening it
+        print("• Syncing data with the private repo…", flush=True)
+        st.repo = DataRepo(s.data_repo, s.db_path.parent)
+        st.sync = st.repo.pull()
+        print(("⚠ " if st.sync.read_only else "✔ ") + st.sync.message)
     db = dbm.Database(s.db_path)
     gemini = GeminiClient(s.gemini_api_key, s.gemini_model, s.gemini_min_interval_sec,
                           state_file=s.cache_dir / "gemini_quota.json",
@@ -238,6 +247,8 @@ def create_app(st: AppState) -> FastAPI:
         # State-changing calls must carry a custom header (blocks cross-site form/JS requests).
         if request.method in ("POST", "PUT", "DELETE") and request.headers.get("x-requested-with") != "job-assistant":
             return JSONResponse({"detail": "missing X-Requested-With header"}, status_code=403)
+        if request.method in ("POST", "PUT", "DELETE") and st.sync.read_only:
+            return JSONResponse({"detail": "Read-only: " + st.sync.message}, status_code=423)
         return await call_next(request)
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
@@ -258,6 +269,7 @@ def create_app(st: AppState) -> FastAPI:
             "gemini": st.gemini_info | {"models": p.gemini.model_status(), "calls": p.gemini.calls},
             "gmail": st.gmail_info, "searxng": st.searx_info | {"queries_run": p.searx.queries_run},
             "stats": stats, "daily_limit": p.s.daily_email_limit,
+            "sync": {"enabled": st.sync.enabled, "read_only": st.sync.read_only, "message": st.sync.message},
             "profile": {"name": p.resume.profile.name, "experience": p.s.candidate_experience,
                         "resumes": list(p.resume.variants)},
         }
@@ -301,7 +313,7 @@ def create_app(st: AppState) -> FastAPI:
     def jobs(view: str = "matches"):
         rows = db.list_jobs(VIEWS.get(view, [dbm.PENDING]))
         if view == "ready":
-            rows = [r for r in rows if r["email_status"] == "draft"]
+            rows = [r for r in rows if r["email_status"] in ("draft", dbm.GMAIL_DRAFT)]
         return rows
 
     def _job_detail(job_id: int) -> dict:
@@ -312,7 +324,7 @@ def create_app(st: AppState) -> FastAPI:
         if email and email["status"] in ("replaced", "skipped"):
             email = None
         if email:
-            att = Path(email["attachment"])
+            att = resolve_attachment(email["attachment"], p.s.resumes_dir)
             email = email | {"attachment_name": att.name, "attachment_sent_as": email.get("attachment_filename") or att.name,
                              "attachment_kb": att.stat().st_size // 1024
                              if att.exists() else None}
@@ -372,6 +384,8 @@ def create_app(st: AppState) -> FastAPI:
             p.draft_email(job_id, rec, data.get("resume"))
         except (QuotaExhausted, GeminiBusy) as e:
             raise HTTPException(429, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
         return _job_detail(job_id)
 
     # ---------------------------------------------------------------- emails
@@ -451,7 +465,7 @@ def create_app(st: AppState) -> FastAPI:
         if email and email["status"] in ("replaced", "skipped"):
             email = None
         if email:
-            att = Path(email["attachment"])
+            att = resolve_attachment(email["attachment"], p.s.resumes_dir)
             email = email | {"attachment_name": att.name,
                              "attachment_sent_as": email.get("attachment_filename") or att.name,
                              "attachment_kb": att.stat().st_size // 1024 if att.exists() else None}
@@ -541,3 +555,13 @@ def serve(s: Settings) -> None:
     finally:
         st.worker.stop()
         st.scout.stop()
+        st.hunt.stop()
+        if st.repo and not st.sync.read_only:      # push the user's changes back for the next cloud run
+            for t in (st.worker.thread, st.scout.thread, st.hunt.thread):
+                if t and t.is_alive():
+                    t.join(timeout=60)
+            st.pipeline.db.checkpoint()
+            print("• " + st.repo.push())
+        elif st.repo:
+            st.pipeline.db.close()
+            print("• " + st.repo.discard_local())

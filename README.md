@@ -97,6 +97,12 @@ The **Funded startups** tab lists AI startups that raised **pre-seed, seed or Se
 Clicking a startup shows origin, funding date, round, amount, investors, founders, the news evidence and sources,
 the fit analysis, contacts and the email. The daily send limit and duplicate checks are shared with job emails.
 
+### Daily cloud run (laptop off, drafts in Gmail)
+`python run.py --daily` runs once without the dashboard: it syncs Gmail drafts you sent or deleted, searches jobs
+and funded startups, puts the best emails (up to the daily limit) into your **Gmail Drafts** and emails you a
+summary. It never sends to recruiters — you press Send in Gmail. Scheduled for free on GitHub Actions from a
+private data repo; the laptop dashboard can sync the same database. Setup: [docs/DAILY_CLOUD_RUN.md](docs/DAILY_CLOUD_RUN.md).
+
 ### Contact policy
 Emails are kept only if they appear **verbatim** in the cited source (checked in code). Data-broker sites
 are excluded, masked/pattern addresses rejected, nothing is guessed. Labels: *Verified on page*, *Seen in
