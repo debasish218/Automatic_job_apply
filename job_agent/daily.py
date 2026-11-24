@@ -26,6 +26,8 @@ from .config import PROJECT_ROOT, Settings
 log = logging.getLogger(__name__)
 
 GMAIL_DRAFTS_URL = "https://mail.google.com/mail/u/0/#drafts"
+GEMINI_TEST_ATTEMPTS = 4          # Gemini 503/504 overloads are usually brief: retry before giving up
+GEMINI_RETRY_WAIT_SEC = 90
 WAITING, SENT, DISCARDED, UNKNOWN = "waiting", "sent", "discarded", "unknown"
 
 
@@ -329,16 +331,44 @@ def run_daily(s: Settings) -> int:
                           state_file=s.cache_dir / "gemini_quota.json",
                           on_event=lambda m: (db.log_event(m, "muted"), say(f"    {m}")))
     say("• Testing Gemini (key value hidden)…")
-    r = gemini.test_connectivity()
-    if not r.ok:
+    gemini_ok = False
+    for attempt in range(GEMINI_TEST_ATTEMPTS):
+        r = gemini.test_connectivity()
+        if r.ok:
+            gemini_ok = True
+            break
+        transient = any(c in r.detail for c in ("503", "504", "UNAVAILABLE", "DEADLINE"))
+        if not transient or attempt == GEMINI_TEST_ATTEMPTS - 1:
+            break
+        say(f"  Gemini busy, retrying in {GEMINI_RETRY_WAIT_SEC}s ({attempt + 1}/{GEMINI_TEST_ATTEMPTS - 1})…")
+        time.sleep(GEMINI_RETRY_WAIT_SEC)
+    if gemini_ok:
+        say(f"✔ Gemini OK via {r.model}")
+    else:
+        # still put already-written drafts into Gmail (needs no Gemini), then stop
         say(f"✖ Gemini API test FAILED: {r.detail}")
         report.errors.append(f"Gemini unavailable — nothing searched today: {r.detail}")
+    try:
+        resume = load_resume_bundle(s.resumes_dir, gemini, s.cache_dir)
+    except Exception as ex:
+        log.exception("Resume load failed")
+        report.errors.append(f"Resume analysis unavailable: {ex}")
         return finish(1)
-    say(f"✔ Gemini OK via {r.model}")
-    resume = load_resume_bundle(s.resumes_dir, gemini, s.cache_dir)
     say(f"✔ Resume: {resume.profile.name} · {len(resume.variants)} versions")
 
     searx = SearxClient(s.searxng_url, s.search_min_interval_sec)
+    if not gemini_ok:
+        p = Pipeline(s, gemini, resume, db, searx, PageFetcher(s.page_user_agent), gmail,
+                     on_event=lambda m, lvl, j: say(f"  [{lvl}] {m}"))
+        p.gmail_ready = False
+        budget = draft_budget(s.daily_email_limit, db.sent_today(), db.pending_gmail_drafts())
+        say(f"• Putting up to {budget} already-written drafts into Gmail")
+        try:
+            push_drafts(db, p, StartupPipeline(p), gmail, budget, report, say)
+        except Exception as ex:
+            log.exception("Pushing drafts failed")
+            report.errors.append(f"Creating Gmail drafts failed: {ex}")
+        return finish(1)
     search_ok, detail = ensure_running(PROJECT_ROOT, searx)
     say(("✔ SearXNG: " if search_ok else "⚠ SearXNG: ") + detail)
     if not search_ok:

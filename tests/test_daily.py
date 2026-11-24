@@ -183,6 +183,7 @@ def test_run_daily_gemini_down_still_syncs_and_reports(tmp_path, monkeypatch):
 
     monkeypatch.setattr(gmail_client, "GmailClient", G)
     monkeypatch.setattr(gemini_client, "GeminiClient", Down)
+    monkeypatch.setattr(daily, "GEMINI_RETRY_WAIT_SEC", 0)
     s = Settings(gemini_api_key="x", db_path=tmp_path / "jobs.db", cache_dir=tmp_path)
     assert daily.run_daily(s) == 1
     assert sent and "warnings" in sent[0]
