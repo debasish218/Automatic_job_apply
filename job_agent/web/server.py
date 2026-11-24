@@ -249,7 +249,10 @@ def create_app(st: AppState) -> FastAPI:
             return JSONResponse({"detail": "missing X-Requested-With header"}, status_code=403)
         if request.method in ("POST", "PUT", "DELETE") and st.sync.read_only:
             return JSONResponse({"detail": "Read-only: " + st.sync.message}, status_code=423)
-        return await call_next(request)
+        resp = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            resp.headers["Cache-Control"] = "no-cache"      # always revalidate, so an update is never stale
+        return resp
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
