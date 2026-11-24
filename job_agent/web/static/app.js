@@ -42,10 +42,10 @@ let currentJob = null;
 async function refreshStatus() {
   try { status = await api("/api/status"); } catch { return; }
   const s = status.stats, g = status.gemini, gm = status.gmail, sx = status.searxng, w = status.worker;
-  const sb = $("#sync-banner"), sy = status.sync || {};
-  sb.hidden = !(sy.enabled && (sy.read_only || /could not/i.test(sy.message || "")));
-  sb.textContent = sy.message || "";
-  sb.className = "banner" + (sy.read_only ? " bad" : "");
+  const syncBanner = $("#sync-banner"), sy = status.sync || {};
+  syncBanner.hidden = !(sy.enabled && (sy.read_only || /could not/i.test(sy.message || "")));
+  syncBanner.textContent = sy.message || "";
+  syncBanner.className = "banner" + (sy.read_only ? " bad" : "");
   $("#profile-line").textContent = `${status.profile.name} · ${status.profile.experience} · ${status.profile.resumes.length} resume versions`;
   const avail = g.models.filter((m) => m.available).length;
   const pill = (cls, text, title = "") => `<span class="pill ${cls}" title="${esc(title)}"><span class="dot"></span>${esc(text)}</span>`;
