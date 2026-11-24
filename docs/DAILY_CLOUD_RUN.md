@@ -1,6 +1,6 @@
 # Daily cloud run (GitHub Actions, free) — drafts in your Gmail
 
-Every morning (08:00 IST) GitHub runs the agent for you, even with your laptop off:
+Every afternoon (14:00 IST, just after the Gemini free quota resets at 13:30 IST) GitHub runs the agent for you, even with your laptop off:
 
 1. checks which drafts from earlier runs you **sent** or **deleted** in Gmail,
 2. searches jobs and recently funded startups, scores them, finds recruiter emails,
@@ -99,7 +99,7 @@ Now `run.py` pulls the cloud's latest database when the dashboard starts and pus
 * Drafts created by the cloud show *"In Gmail drafts"* in the dashboard — send or edit those in Gmail.
 
 ## Good to know / troubleshooting
-* **Don't use the dashboard during the morning run (~08:00–08:45 IST).** If it's running, the dashboard opens
+* **Don't use the dashboard during the daily run (~14:00–14:45 IST).** If it's running, the dashboard opens
   **read-only** with a banner. If laptop and cloud both changed the database, it also opens read-only and the
   banner tells you which command keeps which copy (a database file can't be merged).
 * **Rescue branch:** if the laptop pushed while a run was going, the run saves its data to a `rescue-<id>` branch

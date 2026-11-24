@@ -8,7 +8,7 @@ name: Daily job agent
 
 on:
   schedule:
-    - cron: "30 2 * * *"          # 02:30 UTC = 08:00 IST (GitHub may start it a few minutes late)
+    - cron: "30 8 * * *"          # 08:30 UTC = 14:00 IST, just after the Gemini free quota resets (13:30 IST)
   workflow_dispatch: {}            # "Run workflow" button (also in the GitHub mobile app)
 
 concurrency:
