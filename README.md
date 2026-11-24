@@ -8,6 +8,10 @@ recruiter / HR contacts (with evidence), drafts personalised emails, and sends *
 
 *Matches ranked by resume fit, with experience requirement, source site, contacts found and status.*
 
+
+
+
+
 ![Job details — match analysis and contacts](docs/screenshots/job-details.png)
 
 *Job panel: Gemini match analysis (matching / missing skills, experience comparison, reasoning) and
@@ -75,6 +79,23 @@ provider) → resume analysis (cached) → Gmail status → SearXNG status → d
 * **Find emails for matches without one** runs a deeper email-focused search (hiring posts, "send your CV to…",
   company careers/contact pages) for every match lacking an email. Recruiters shown hiring for an unrelated
   function (e.g. finance) are flagged and never auto-selected.
+
+### Funded startups (separate list)
+The **Funded startups** tab lists AI startups that raised **pre-seed, seed or Series A in the last 30 days**
+(`FUNDING_WINDOW_DAYS`), so you can email them before they post jobs. Press **Find funded startups**:
+1. Funding-news searches via SearXNG (Inc42, Entrackr, YourStory, VCCircle, ET, Moneycontrol, …), past month only.
+2. Gemini extracts each deal from the article: company, what they build, origin (HQ), founded, founders, round,
+   amount, date, investors, use of funds. Only facts written in the article; the company name must appear in it.
+3. Rules enforced in code: allowed rounds, date within the window, AI/ML related, and location —
+   **Indian companies** (or companies with a team in India) are preferred; **Japan / UAE** companies are kept only
+   when the source shows they hire from India; other countries are excluded.
+4. Fit score 0–100 against your resume (product/skill overlap 50%, role relevance 30%, likelihood of hiring you in
+   India 20%; non-Indian HQ −10). Only good fits (≥ `MIN_MATCH_SCORE`) are listed; the rest are under *Filtered out*
+   with the reason.
+5. Contact search (founders, careers / team inboxes, same evidence rules) → cold email draft → you review and send.
+
+Clicking a startup shows origin, funding date, round, amount, investors, founders, the news evidence and sources,
+the fit analysis, contacts and the email. The daily send limit and duplicate checks are shared with job emails.
 
 ### Contact policy
 Emails are kept only if they appear **verbatim** in the cited source (checked in code). Data-broker sites

@@ -67,6 +67,11 @@ class Settings:
     auto_draft: bool = True                     # draft an email automatically when a contact email is found
     web_port: int = 8765
 
+    # Funded-startup outreach
+    funding_window_days: int = 30               # only rounds announced within this many days
+    funding_queries_per_scan: int = 8           # funding-news searches per "Find funded startups" run
+    funding_max_articles: int = 12              # news articles read with Gemini per run (quota friendly)
+
 
 def load_settings(env_file: Path | None = None) -> Settings:
     load_dotenv(env_file or PROJECT_ROOT / ".env")
@@ -79,6 +84,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
     s.search_min_interval_sec = _float("SEARCH_MIN_INTERVAL_SEC", s.search_min_interval_sec)
     s.queries_per_pass = _int("QUERIES_PER_PASS", s.queries_per_pass)
     s.web_port = _int("WEB_PORT", s.web_port)
+    s.funding_window_days = _int("FUNDING_WINDOW_DAYS", s.funding_window_days)
     if os.getenv("JOB_AGENT_DB"):
         s.db_path = Path(os.environ["JOB_AGENT_DB"])
     for d in (s.db_path.parent, s.cache_dir, s.log_dir, s.gmail_credentials.parent):

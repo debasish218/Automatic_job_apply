@@ -31,6 +31,7 @@
     <button data-view="sent">Sent <span class="count" id="c-sent"></span></button>
     <button data-view="filtered">Filtered out</button>
     <button data-view="skipped">Skipped</button>
+    <button data-view="startups">Funded startups <span class="count" id="c-startups"></span></button>
     <button data-view="companies">Companies</button>
     <button data-view="activity">Activity</button>
   </nav>
@@ -40,6 +41,13 @@
       <input id="search" type="search" placeholder="Filter by company, title, location…">
       <button id="btn-hunt" class="btn small" title="Deep web search (SearXNG + Gemini) for recruiter/HR emails on every match that has none">Find emails for matches without one</button>
       <span id="hunt-status" class="sub"></span>
+      <select id="s-view" class="s-only" title="Which startups to show">
+        <option value="matches">Good fits</option><option value="sent">Emailed</option>
+        <option value="filtered">Filtered out</option><option value="skipped">Skipped</option><option value="all">All</option>
+      </select>
+      <button id="btn-scan" class="btn small primary s-only" title="Search funding news (SearXNG + Gemini) for AI startups that raised pre-seed / seed / Series A recently">Find funded startups</button>
+      <button id="btn-semails" class="btn small s-only" title="Read each startup's website (then search the web) for a recruiter email; general inboxes like hello@ are used only if no recruiter email exists">Find emails for startups without one</button>
+      <span id="scan-status" class="sub s-only"></span>
     </div>
     <div id="list"></div>
   </section>

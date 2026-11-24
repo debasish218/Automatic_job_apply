@@ -86,6 +86,80 @@ CREATE TABLE IF NOT EXISTS search_queries (
     postings INTEGER DEFAULT 0
 );
 
+-- Recently funded startups (separate from job postings)
+CREATE TABLE IF NOT EXISTS startups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    name_key TEXT NOT NULL UNIQUE,
+    website TEXT,
+    domain TEXT,
+    description TEXT,
+    sector TEXT,
+    hq_city TEXT,
+    hq_country TEXT,
+    region TEXT,
+    founded_year TEXT,
+    founders TEXT,
+    funding_round TEXT,
+    amount TEXT,
+    funding_date TEXT,
+    investors TEXT,
+    india_presence TEXT,
+    india_hiring_evidence TEXT,
+    use_of_funds TEXT,
+    source_url TEXT,
+    source_title TEXT,
+    evidence TEXT,
+    other_sources TEXT,
+    discovered_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'new',
+    status_reason TEXT,
+    score INTEGER,
+    fit TEXT,
+    contacts_searched TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_startups_status ON startups(status);
+
+CREATE TABLE IF NOT EXISTS startup_contacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    startup_id INTEGER NOT NULL REFERENCES startups(id),
+    name TEXT,
+    designation TEXT,
+    email TEXT,
+    linkedin TEXT,
+    source_url TEXT,
+    verification TEXT NOT NULL,
+    evidence TEXT,
+    kind TEXT,
+    domain_match INTEGER,
+    created_at TEXT NOT NULL,
+    UNIQUE(startup_id, email)
+);
+
+CREATE TABLE IF NOT EXISTS startup_emails (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    startup_id INTEGER NOT NULL REFERENCES startups(id),
+    recipient TEXT NOT NULL,
+    recruiter_name TEXT,
+    subject TEXT NOT NULL,
+    body TEXT NOT NULL,
+    attachment TEXT NOT NULL,
+    attachment_filename TEXT,
+    status TEXT NOT NULL DEFAULT 'draft',
+    gmail_message_id TEXT,
+    error TEXT,
+    model TEXT,
+    created_at TEXT NOT NULL,
+    sent_at TEXT
+);
+
+-- News articles already read for funding announcements (never re-read)
+CREATE TABLE IF NOT EXISTS funding_articles (
+    url TEXT PRIMARY KEY,
+    read_at TEXT NOT NULL,
+    deals INTEGER DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
@@ -115,6 +189,16 @@ def now() -> str:
 
 def normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+COMPANY_SUFFIX_RE = re.compile(
+    r"\b(private limited|pvt ltd|pvt|ltd|limited|inc|llc|technologies|technology|labs|ai|corp|co)\b")
+
+
+def company_key(name: str) -> str:
+    """Normalised company name for de-duplication ("Sarvam AI Pvt Ltd" == "Sarvam")."""
+    key = COMPANY_SUFFIX_RE.sub(" ", normalize(name))
+    return re.sub(r"\s+", " ", key).strip() or normalize(name)
 
 
 def fingerprint(company: str, title: str, location: str) -> str:
@@ -267,9 +351,25 @@ class Database:
         return None
 
     def sent_today(self) -> int:
+        """Emails sent today across job applications and startup outreach (one shared daily limit)."""
         today = datetime.now().date().isoformat()
-        return self.conn.execute("SELECT COUNT(*) FROM emails WHERE status='sent' AND sent_at>=?",
-                                 (today,)).fetchone()[0]
+        return sum(self.conn.execute(f"SELECT COUNT(*) FROM {t} WHERE status='sent' AND sent_at>=?",
+                                     (today,)).fetchone()[0] for t in ("emails", "startup_emails"))
+
+    def recipient_recently_emailed(self, recipient: str, window_days: int) -> str | None:
+        """Any email (job or startup) already sent to this address within the window."""
+        since = (datetime.now() - timedelta(days=window_days)).isoformat(timespec="seconds")
+        r = self.conn.execute("""SELECT e.id, j.company FROM emails e JOIN jobs j ON j.id=e.job_id
+                                 WHERE e.status='sent' AND e.recipient=? AND e.sent_at>=?""",
+                              (recipient.lower(), since)).fetchone()
+        if r:
+            return f"{recipient} was already emailed about a job at {r['company']} (email #{r['id']})"
+        r = self.conn.execute("""SELECT e.id, s.name FROM startup_emails e JOIN startups s ON s.id=e.startup_id
+                                 WHERE e.status='sent' AND e.recipient=? AND e.sent_at>=?""",
+                              (recipient.lower(), since)).fetchone()
+        if r:
+            return f"{recipient} was already emailed about {r['name']} (startup email #{r['id']})"
+        return None
 
     def job_exists(self, external_id: str) -> bool:
         return self.conn.execute("SELECT 1 FROM jobs WHERE external_id=?", (external_id,)).fetchone() is not None
@@ -331,6 +431,142 @@ class Database:
                FROM jobs j LEFT JOIN analyses a ON a.job_id=j.id GROUP BY lower(j.company)
                ORDER BY best_score DESC NULLS LAST, jobs DESC""")]
 
+    # ---------------------------------------------------------------- funded startups
+    def article_read(self, url: str) -> bool:
+        return self.conn.execute("SELECT 1 FROM funding_articles WHERE url=?", (url,)).fetchone() is not None
+
+    def mark_article(self, url: str, deals: int) -> None:
+        self.conn.execute("INSERT OR REPLACE INTO funding_articles (url, read_at, deals) VALUES (?,?,?)",
+                          (url, now(), deals))
+        self.conn.commit()
+
+    def find_startup(self, name: str, domain: str | None = None) -> dict | None:
+        row = self.conn.execute("SELECT * FROM startups WHERE name_key=?", (company_key(name),)).fetchone()
+        if not row and domain:
+            row = self.conn.execute("SELECT * FROM startups WHERE domain=?", (domain,)).fetchone()
+        return self._startup(row)
+
+    def startup_names(self) -> list[str]:
+        return [normalize(r["name"]) for r in self.conn.execute("SELECT name FROM startups")]
+
+    def insert_startup(self, d: dict[str, Any]) -> int:
+        cols = ["name", "name_key", "website", "domain", "description", "sector", "hq_city", "hq_country", "region",
+                "founded_year", "founders", "funding_round", "amount", "funding_date", "investors", "india_presence",
+                "india_hiring_evidence", "use_of_funds", "source_url", "source_title", "evidence", "status", "status_reason"]
+        vals = dict(d, name_key=company_key(d["name"]), founders=json.dumps(d.get("founders") or []),
+                    investors=json.dumps(d.get("investors") or []), status=d.get("status", NEW))
+        cur = self.conn.execute(
+            f"INSERT INTO startups ({', '.join(cols)}, discovered_at) VALUES ({','.join('?' * len(cols))}, ?)",
+            (*(vals.get(c) for c in cols), now()))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def add_startup_source(self, startup_id: int, url: str) -> None:
+        s = self.get_startup(startup_id)
+        if not s or url == s["source_url"] or url in s["other_sources"]:
+            return
+        self.update_startup(startup_id, other_sources=json.dumps(s["other_sources"] + [url]))
+
+    def update_startup(self, startup_id: int, **fields: Any) -> None:
+        if "fit" in fields and not isinstance(fields["fit"], (str, type(None))):
+            fields["fit"] = json.dumps(fields["fit"])
+        self.conn.execute(f"UPDATE startups SET {', '.join(f'{k}=?' for k in fields)} WHERE id=?",
+                          (*fields.values(), startup_id))
+        self.conn.commit()
+
+    @staticmethod
+    def _startup(row) -> dict | None:
+        if not row:
+            return None
+        d = dict(row)
+        for k in ("founders", "investors", "other_sources"):
+            d[k] = json.loads(d.get(k) or "[]")
+        d["fit"] = json.loads(d["fit"]) if d.get("fit") else None
+        return d
+
+    def get_startup(self, startup_id: int) -> dict | None:
+        return self._startup(self.conn.execute("SELECT * FROM startups WHERE id=?", (startup_id,)).fetchone())
+
+    def startups_with_status(self, *statuses: str) -> list[dict]:
+        q = f"SELECT * FROM startups WHERE status IN ({','.join('?' * len(statuses))}) ORDER BY id"
+        return [self._startup(r) for r in self.conn.execute(q, statuses)]
+
+    def list_startups(self, statuses: list[str] | None = None, limit: int = 500) -> list[dict]:
+        q = """SELECT s.id, s.name, s.description, s.sector, s.hq_city, s.hq_country, s.region, s.funding_round,
+                      s.amount, s.funding_date, s.status, s.status_reason, s.score, s.website, s.discovered_at,
+                      (SELECT COUNT(*) FROM startup_contacts c WHERE c.startup_id=s.id) AS contacts,
+                      (SELECT COUNT(*) FROM startup_contacts c WHERE c.startup_id=s.id AND c.email IS NOT NULL)
+                          AS emails_found,
+                      (SELECT e.status FROM startup_emails e WHERE e.startup_id=s.id ORDER BY e.id DESC LIMIT 1)
+                          AS email_status
+               FROM startups s"""
+        args: tuple = ()
+        if statuses:
+            q += f" WHERE s.status IN ({','.join('?' * len(statuses))})"
+            args = tuple(statuses)
+        q += " ORDER BY COALESCE(s.score,-1) DESC, s.funding_date DESC, s.id DESC LIMIT ?"
+        return [dict(r) for r in self.conn.execute(q, (*args, limit))]
+
+    def add_startup_contact(self, startup_id: int, *, email: str | None, verification: str, source_url: str | None,
+                            name: str | None = None, designation: str | None = None, linkedin: str | None = None,
+                            evidence: str | None = None, kind: str | None = None,
+                            domain_match: bool | None = None) -> int:
+        if not email and linkedin:
+            r = self.conn.execute("SELECT id FROM startup_contacts WHERE startup_id=? AND linkedin=?",
+                                  (startup_id, linkedin)).fetchone()
+            if r:
+                return r["id"]
+        cur = self.conn.execute(
+            """INSERT OR IGNORE INTO startup_contacts (startup_id, name, designation, email, linkedin, source_url,
+               verification, evidence, kind, domain_match, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (startup_id, name, designation, email.lower() if email else None, linkedin, source_url, verification,
+             evidence, kind, None if domain_match is None else int(domain_match), now()))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def upsert_site_contact(self, startup_id: int, *, email: str, kind: str, designation: str, name: str | None,
+                            source_url: str, evidence: str) -> None:
+        """Website-crawl result: insert, or correct the kind/label of an address saved earlier."""
+        self.add_startup_contact(startup_id, email=email, verification="verified_on_page", source_url=source_url,
+                                 name=name, designation=designation, evidence=evidence, kind=kind, domain_match=True)
+        self.conn.execute("""UPDATE startup_contacts SET kind=?, designation=?, name=COALESCE(?, name)
+                             WHERE startup_id=? AND email=? AND verification<>'user_provided'""",
+                          (kind, designation, name, startup_id, email.lower()))
+        self.conn.commit()
+
+    def get_startup_contacts(self, startup_id: int) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM startup_contacts WHERE startup_id=? ORDER BY id", (startup_id,))]
+
+    def save_startup_email(self, startup_id: int, recipient: str, recruiter_name: str | None, subject: str,
+                           body: str, attachment: str, model: str | None, attachment_filename: str | None) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO startup_emails (startup_id, recipient, recruiter_name, subject, body, attachment,
+               attachment_filename, status, model, created_at) VALUES (?,?,?,?,?,?,?,'draft',?,?)""",
+            (startup_id, recipient.lower(), recruiter_name, subject, body, attachment, attachment_filename, model,
+             now()))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_startup_email(self, email_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM startup_emails WHERE id=?", (email_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_startup_email(self, email_id: int, **fields: Any) -> None:
+        self.conn.execute(f"UPDATE startup_emails SET {', '.join(f'{k}=?' for k in fields)} WHERE id=?",
+                          (*fields.values(), email_id))
+        self.conn.commit()
+
+    def latest_startup_email(self, startup_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM startup_emails WHERE startup_id=? ORDER BY id DESC LIMIT 1",
+                                (startup_id,)).fetchone()
+        return dict(row) if row else None
+
+    def startup_stats(self) -> dict[str, int]:
+        d = {r["status"]: r["n"] for r in self.conn.execute("SELECT status, COUNT(*) n FROM startups GROUP BY status")}
+        d["total"] = sum(d.values())
+        return d
+
     # ---------------------------------------------------------------- stats
     def stats(self) -> dict[str, int]:
         d = {r["status"]: r["n"] for r in self.conn.execute("SELECT status, COUNT(*) n FROM jobs GROUP BY status")}
@@ -338,5 +574,7 @@ class Database:
         d["emails_sent"] = self.conn.execute("SELECT COUNT(*) FROM emails WHERE status='sent'").fetchone()[0]
         d["sent_today"] = self.sent_today()
         d["companies"] = self.conn.execute("SELECT COUNT(DISTINCT lower(company)) FROM jobs").fetchone()[0]
+        d["startup_emails_sent"] = self.conn.execute(
+            "SELECT COUNT(*) FROM startup_emails WHERE status='sent'").fetchone()[0]
         d["queries_run"] = self.conn.execute("SELECT COALESCE(SUM(runs),0) FROM search_queries").fetchone()[0]
         return d

@@ -127,3 +127,7 @@ textarea { min-height: 300px; resize: vertical; line-height: 1.5; }
 .addbox { border-color: var(--warn); background: var(--warn-bg); margin-bottom: 12px; }
 .addbox input { background: var(--surface); }
 .locked { padding: 8px 10px; border: 1px dashed var(--border); border-radius: 8px; background: var(--surface-2); font-family: ui-monospace, monospace; font-size: 13px; }
+
+.list-head select { width: auto; }
+.s-intro { padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; background: var(--surface-2); }
+.region { font-size: 11px; }

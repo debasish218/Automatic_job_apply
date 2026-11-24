@@ -25,6 +25,23 @@ IRRELEVANT_LOCAL = re.compile(
     r"applicant-?privacy|data-?protection|.*accommodation.*|.*privacy.*)$", re.I)
 RECRUITING_LOCAL = re.compile(r"(career|job|hiring|hire|talent|recruit|hr|people|ta\b|campus)", re.I)
 
+# Shared inboxes that are fine for contacting a small startup when no recruiting address exists.
+GENERAL_LOCAL = re.compile(
+    r"^(info|hello|hi|hey|contact|contactus|contact-us|team|connect|office|admin|enquiry|enquiries|inquiry|"
+    r"inquiries|mail|reach|reachus|talk|founders?|general|business|partner|partners)$", re.I)
+
+
+def classify_startup(email: str) -> str | None:
+    """Startup contacts: recruiting inboxes first, general inboxes allowed. Returns kind or None (unusable)."""
+    local = email.split("@")[0]
+    if GENERAL_LOCAL.match(local):
+        return "general_inbox"
+    kind = classify(email)
+    if kind == "recruiting_inbox":
+        return "careers_inbox"
+    return kind          # "personal" | "other" | None
+
+
 VERIFIED = "verified_on_page"
 USER_PROVIDED = "user_provided"
 

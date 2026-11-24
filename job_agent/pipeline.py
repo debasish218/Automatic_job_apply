@@ -323,8 +323,9 @@ class Pipeline:
         usable = [r for r in recs if r["email"] and r.get("kind") != "other_function"]
         if not usable:
             return None
-        order = {"user_provided": 0, "job_post_contact": 1, "recruiter": 2, "hr_inbox": 3, "careers_inbox": 4}
-        usable.sort(key=lambda r: (order.get(r.get("kind") or "", 5), r.get("domain_match") == 0,
+        order = {"user_provided": 0, "job_post_contact": 1, "recruiter": 2, "founder": 2, "hr_inbox": 3,
+                 "careers_inbox": 4, "team_member": 5, "general_inbox": 7}     # general inboxes only as last resort
+        usable.sort(key=lambda r: (order.get(r.get("kind") or "", 6), r.get("domain_match") == 0,
                                    r["verification"] != "verified_on_page"))
         return usable[0]
 
@@ -384,6 +385,13 @@ class Pipeline:
         if not self.gmail or not self.gmail_ready:
             return SendResult(False, "Gmail is not authenticated — nothing sent. Run: python run.py --gmail-auth")
         dup = self.db.duplicate_send_reason(job["id"], e["recipient"], job["company"], self.s.duplicate_window_days)
+        if not dup:
+            r = self.db.conn.execute(
+                "SELECT e.id, s.name FROM startup_emails e JOIN startups s ON s.id=e.startup_id "
+                "WHERE e.status='sent' AND e.recipient=? AND e.sent_at>=date('now', ?)",
+                (e["recipient"], f"-{self.s.duplicate_window_days} days")).fetchone()
+            if r:
+                dup = f"{e['recipient']} was already emailed about {r['name']} (startup email #{r['id']})"
         if dup:
             return SendResult(False, f"Blocked duplicate: {dup}")
         if self.db.sent_today() >= self.s.daily_email_limit:

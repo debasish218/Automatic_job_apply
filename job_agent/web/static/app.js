@@ -68,7 +68,35 @@ async function refreshStatus() {
   $("#hunt-status").textContent = h.state === "running" ? `Searching… ${status.worker.step || ""}`.replace("idle", "")
     : h.result ? `Last email search: ${h.result}` : "";
   $("#c-sent").textContent = s.emailed || "";
+  const ss = status.startup_scan, sb = $("#btn-scan");
+  const scanning = ss.state === "running" && ss.task === "scan", emailing = ss.state === "running" && ss.task === "emails";
+  sb.textContent = scanning ? "Stop startup search" : "Find funded startups";
+  sb.className = "btn small s-only " + (scanning ? "danger" : "primary");
+  sb.disabled = emailing;
+  const se = $("#btn-semails");
+  se.textContent = emailing ? "Stop email search" : "Find emails for startups without one";
+  se.className = "btn small s-only " + (emailing ? "danger" : "");
+  se.disabled = scanning;
+  $("#scan-status").textContent = ss.state === "running" ? (status.worker.step || "Searching…").replace(/^idle$/, "Searching…")
+    : ss.result ? `Last search: ${ss.result}` : "";
+  $("#c-startups").textContent = (status.startup_stats || {}).pending_review || "";
+  if (ss.state !== lastScanState) { if (lastScanState === "running" && view === "startups") loadList(); lastScanState = ss.state; }
 }
+let lastScanState = null;
+
+$("#btn-scan").addEventListener("click", async (e) => {
+  const running = status?.startup_scan.state === "running";
+  if (!running && !confirm(`Search funding news for AI startups that raised pre-seed / seed / Series A in the last ${status?.funding_window_days || 30} days?\n\nIndian companies first; Japan / UAE only if they hire from India. Each good fit is scored against your resume, then its contacts are searched.\nTakes ~5–15 minutes (searches are slowed down to avoid being blocked).`)) return;
+  await busy(e.currentTarget, running ? "Stopping" : "Starting", () => api(running ? "/api/startups/scan/stop" : "/api/startups/scan", { method: "POST" }));
+  refreshStatus();
+});
+$("#s-view").addEventListener("change", () => loadList());
+$("#btn-semails").addEventListener("click", async (e) => {
+  const running = status?.startup_scan.state === "running";
+  if (!running && !confirm("Find emails for every good-fit startup without one?\n\nFirst each company's own website (careers, contact, about pages), then a web search for recruiters / founders. Recruiter emails are preferred; general inboxes (hello@, info@, contact@) are used only when nothing better is found.")) return;
+  await busy(e.currentTarget, running ? "Stopping" : "Starting", () => api(running ? "/api/startups/scan/stop" : "/api/startups/find-emails", { method: "POST" }));
+  refreshStatus();
+});
 
 $("#btn-run").addEventListener("click", async (e) => {
   const running = ["running", "waiting"].includes(status?.worker.state);
@@ -92,7 +120,7 @@ async function pollEvents() {
       events.push(...rows);
       if (events.length > 600) events.splice(0, events.length - 600);
       if (view === "activity") renderActivity();
-      if (rows.some((r) => r.level === "good") && ["ready", "matches"].includes(view)) loadList();
+      if (rows.some((r) => r.level === "good") && ["ready", "matches", "startups"].includes(view)) loadList();
     }
   } catch { /* server restarting */ }
 }
@@ -112,9 +140,12 @@ let rows = [];
 async function loadList() {
   $("#search").parentElement.style.display = view === "activity" ? "none" : "";
   $("#btn-hunt").style.display = $("#hunt-status").style.display = ["matches", "ready"].includes(view) ? "" : "none";
+  document.querySelectorAll(".s-only").forEach((x) => (x.style.display = view === "startups" ? "" : "none"));
   if (view === "activity") return renderActivity();
   try {
-    rows = view === "companies" ? await api("/api/companies") : await api(`/api/jobs?view=${view}`);
+    rows = view === "companies" ? await api("/api/companies")
+      : view === "startups" ? await api(`/api/startups?view=${$("#s-view").value}`)
+      : await api(`/api/jobs?view=${view}`);
   } catch (e) { rows = []; toast(e.message, true); }
   if (view === "ready") $("#c-ready").textContent = rows.length || "";
   renderRows();
@@ -137,6 +168,7 @@ function renderRows() {
     }));
     return;
   }
+  if (view === "startups") return renderStartupRows(list);
   if (!list.length) {
     const msg = { ready: "No drafted emails waiting. Matches without a recruiter email are under “All matches”.", matches: "No matches to review yet — press Start discovery.", sent: "Nothing sent yet.", filtered: "Nothing filtered yet.", skipped: "Nothing skipped." }[view] || "Nothing here.";
     el.innerHTML = `<div class="empty">${esc(msg)}</div>`;
@@ -185,19 +217,29 @@ const VERIF = {
   linkedin_search_result: ["info", "LinkedIn search result"], user_provided: ["info", "Added by you"],
 };
 
+const KIND_TAG = {
+  founder: '<span class="tag info">founder</span>',
+  careers_inbox: '<span class="tag good" title="Recruiting address — first choice">careers / HR</span>',
+  recruiter: '<span class="tag good" title="Recruiting contact — first choice">recruiter</span>',
+  general_inbox: '<span class="tag warn" title="General company inbox — used only when no recruiter email is found">general inbox</span>',
+  team_member: '<span class="tag">team member</span>',
+};
+function contactRow(c, canWrite) {
+  const [cls, label] = VERIF[c.verification] || ["", c.verification];
+  const dm = c.email ? (c.domain_match === 1 ? '<span class="tag good">company domain</span>' : c.domain_match === 0 ? '<span class="tag warn">other domain</span>' : "") : "";
+  return `<div class="contact"><div>
+      <b>${esc(c.name || (c.kind || "").replace("_", " ") || "Contact")}</b> <span class="sub">${esc(c.designation || "")}</span> ${KIND_TAG[c.kind] || ""}<br>
+      ${c.email ? `<code>${esc(c.email)}</code> ` : '<span class="sub">no email published</span> '}${dm}
+      <span class="tag ${cls}">${esc(label)}</span> ${c.kind === "other_function" ? '<span class="tag bad" title="Their post/profile shows hiring for a different function">recruits for another function</span>' : ""} ${c.linkedin ? link(c.linkedin, "LinkedIn") : ""}
+      <div class="evidence">“${esc(c.evidence || "")}” — ${link(c.source_url, "source")}</div></div>
+    <div>${c.email && canWrite ? `<button class="btn small" data-use="${c.id}">Write email</button>` : ""}</div></div>`;
+}
+
 function renderJob(d) {
   currentJob = d;
   const j = d.job, a = d.analysis, e = d.email;
-  const contacts = d.contacts.map((c) => {
-    const [cls, label] = VERIF[c.verification] || ["", c.verification];
-    const dm = c.email ? (c.domain_match === 1 ? '<span class="tag good">company domain</span>' : c.domain_match === 0 ? '<span class="tag warn">other domain</span>' : "") : "";
-    return `<div class="contact"><div>
-        <b>${esc(c.name || (c.kind || "").replace("_", " ") || "Contact")}</b> <span class="sub">${esc(c.designation || "")}</span><br>
-        ${c.email ? `<code>${esc(c.email)}</code> ` : '<span class="sub">no email published</span> '}${dm}
-        <span class="tag ${cls}">${esc(label)}</span> ${c.kind === "other_function" ? '<span class="tag bad" title="Their post/profile shows hiring for a different function">recruits for another function</span>' : ""} ${c.linkedin ? link(c.linkedin, "LinkedIn") : ""}
-        <div class="evidence">“${esc(c.evidence || "")}” — ${link(c.source_url, "source")}</div></div>
-      <div>${c.email && j.status !== "emailed" ? `<button class="btn small" data-use="${c.id}">Write email</button>` : ""}</div></div>`;
-  }).join("") || '<div class="sub">No contacts found yet. Recruiter emails are rarely published — use “Find contacts”, add one you know, or apply via the posting.</div>';
+  const contacts = d.contacts.map((c) => contactRow(c, j.status !== "emailed")).join("")
+    || '<div class="sub">No contacts found yet. Recruiter emails are rarely published — use “Find contacts”, add one you know, or apply via the posting.</div>';
 
   const foundEmail = d.contacts.some((c) => c.email && c.verification !== "user_provided");
   const canAdd = !foundEmail && !["emailed"].includes(j.status);
@@ -275,22 +317,158 @@ function renderJob(d) {
   act("#btn-approve", "Saving", async () => {
     const saved = await api(`/api/emails/${e.id}`, { method: "PUT", body: edits() });   // persist what the user sees
     renderJob(saved);
-    confirmSend(saved);
+    confirmSend(saved, { what: `${saved.job.title} — ${saved.job.company}`, url: `/api/emails/${e.id}/send`, rerender: renderJob });
+  });
+}
+
+// ---------------------------------------------------------------- funded startups
+const REGION = { india: ["good", "🇮🇳 India"], india_team: ["info", "India team"], japan: ["warn", "Japan · hires from India"], uae: ["warn", "UAE · hires from India"], other: ["", "Other"] };
+const regionTag = (r) => { const [c, l] = REGION[r] || ["", r || "—"]; return `<span class="tag ${c} region">${esc(l)}</span>`; };
+const roundLabel = (r) => (r || "—").replace(/\b\w/g, (m) => m.toUpperCase()).replace("Pre-Series A", "Pre-Series A");
+const ago = (d) => { if (!d) return ""; const n = Math.round((Date.now() - new Date(d)) / 864e5); return n <= 0 ? "today" : n === 1 ? "1 day ago" : `${n} days ago`; };
+
+function renderStartupRows(list) {
+  const el = $("#list");
+  const intro = `<div class="s-intro">AI startups that raised pre-seed / seed / Series A in the last ${status?.funding_window_days || 30} days, from funding news. Indian companies preferred; Japan / UAE only with evidence they hire from India. Score = fit with your resume (startups outside India get −10).</div>`;
+  if (!list.length) {
+    const sv = $("#s-view").value;
+    el.innerHTML = intro + `<div class="empty">${sv === "matches" ? "No funded startups yet — press “Find funded startups”." : "Nothing here."}</div>`;
+    return;
+  }
+  el.innerHTML = intro + `<table><thead><tr><th>Score</th><th>Startup</th><th>Origin</th><th>Round</th><th>Funded</th><th>Contacts</th><th>Status</th></tr></thead><tbody>${list
+    .map((r) => {
+      const st = r.email_status === "draft" ? '<span class="tag info">Draft ready</span>' : r.email_status === "sent" ? '<span class="tag good">Sent</span>'
+        : r.status === "pending_review" ? (r.emails_found ? '<span class="tag warn">Write email</span>' : `<span class="tag warn">Needs contact</span> <button class="btn small" data-sadd="${r.id}">+ Add email</button>`)
+        : `<span class="tag">${esc(r.status.replace("_", " "))}</span>`;
+      const reason = ["filtered_out", "skipped", "new"].includes(r.status) ? `<div class="sub">${esc(r.status_reason || "")}</div>` : "";
+      return `<tr data-sid="${r.id}"><td>${scoreBadge(r.score)}</td>
+        <td><b>${esc(r.name)}</b><div class="sub">${esc((r.description || r.sector || "").slice(0, 110))}</div>${reason}</td>
+        <td>${esc([r.hq_city, r.hq_country].filter(Boolean).join(", ") || "—")}<div>${regionTag(r.region)}</div></td>
+        <td><b>${esc(roundLabel(r.funding_round))}</b><div class="sub">${esc(r.amount || "amount n/a")}</div></td>
+        <td>${esc(r.funding_date || "—")}<div class="sub">${esc(ago(r.funding_date))}</div></td>
+        <td>${r.contacts ? `${r.contacts} <span class="sub">(${r.emails_found} email)</span>` : '<span class="sub">—</span>'}</td><td>${st}</td></tr>`;
+    }).join("")}</tbody></table>`;
+  el.querySelectorAll("tr[data-sid]").forEach((tr) => tr.addEventListener("click", () => openStartup(+tr.dataset.sid)));
+  el.querySelectorAll("[data-sadd]").forEach((b) => b.addEventListener("click", (ev) => { ev.stopPropagation(); openStartup(+b.dataset.sadd, true); }));
+}
+
+async function openStartup(id, focusAdd = false) {
+  openDrawer();
+  $("#drawer-body").innerHTML = '<div class="empty"><span class="spinner"></span> Loading…</div>';
+  try {
+    renderStartup(await api(`/api/startups/${id}`));
+    const inp = $("#add-email");
+    if (focusAdd && inp) { inp.scrollIntoView({ behavior: "smooth", block: "center" }); inp.focus(); }
+  } catch (e) { $("#drawer-body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+
+function renderStartup(d) {
+  const s = d.startup, f = s.fit, e = d.email;
+  const emailed = s.status === "emailed";
+  const list = (arr, cls = "") => (arr || []).length ? (arr || []).map((x) => `<span class="tag ${cls}">${esc(x)}</span>`).join("") : '<span class="sub">—</span>';
+  const bullets = (arr) => (arr || []).length ? `<ul style="margin:0;padding-left:18px">${arr.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : '<span class="sub">—</span>';
+  const site = s.website ? (safeUrl(s.website) ? s.website : `https://${s.website}`) : s.domain ? `https://${s.domain}` : null;
+  const contacts = d.contacts.map((c) => contactRow(c, !emailed)).join("")
+    || '<div class="sub">No contacts found yet. Startups rarely publish emails — use “Search web for emails”, or add one you know (e.g. a founder’s email from their site or LinkedIn).</div>';
+  const foundEmail = d.contacts.some((c) => c.email && c.verification !== "user_provided");
+  const addBox = !foundEmail && !emailed ? `
+    <div class="card addbox"><b>No email found for this startup.</b> If you know one (founder, careers or team inbox), add it — Gemini will write the email for you to review and send.
+      <div class="row"><div><label>Email</label><input id="add-email" type="email" placeholder="founder@startup.ai"></div><div><label>Name (optional)</label><input id="add-name" type="text" placeholder="e.g. Ananya Iyer"></div></div>
+      <label>Where you found it (optional)</label><input id="add-src" type="text" placeholder="LinkedIn profile / page URL">
+      <div class="d-actions"><button class="btn primary" id="btn-add-save">Add email &amp; write draft</button></div></div>` : "";
+  const recipientNote = e ? ((d.contacts.find((x) => x.email === e.recipient) || {}).verification !== "user_provided" ? "found by search — locked" : "added by you") : "";
+  const emailBlock = e ? `
+    <div class="card">
+      <div class="row"><div><label>To <span class="sub">(${esc(recipientNote)})</span></label><div class="locked">🔒 ${esc(e.recipient)}</div></div>
+        <div><label>Attach resume</label><select id="em-resume" ${e.status !== "draft" ? "disabled" : ""}>${d.resumes.map((r) => `<option ${e.attachment_name === r ? "selected" : ""}>${esc(r)}</option>`).join("")}</select></div></div>
+      <label>Subject</label><input id="em-subject" type="text" value="${esc(e.subject)}" ${e.status !== "draft" ? "disabled" : ""}>
+      <div class="sub" style="margin-top:6px">Attachment will be sent as <b>${esc(e.attachment_sent_as)}</b></div>
+      <label>Body</label><textarea id="em-body" ${e.status !== "draft" ? "disabled" : ""}>${esc(e.body)}</textarea>
+      <div class="sub" style="margin-top:6px">Status: <b>${esc(e.status)}</b>${e.sent_at ? ` · sent ${esc(e.sent_at)}` : ""}${e.model ? ` · written by ${esc(e.model)}` : ""}${e.error ? ` · <span style="color:var(--bad)">last error: ${esc(e.error)}</span>` : ""}</div>
+      ${e.status === "draft" ? `<div class="d-actions"><button class="btn good" id="btn-approve">Review &amp; send…</button><button class="btn" id="btn-save">Save edits</button><button class="btn" id="btn-regen">Rewrite with Gemini</button></div>` : ""}
+    </div>` : `<div class="sub">No email yet. ${!f ? "Score this startup first (“Re-score”)." : d.contacts.some((c) => c.email) ? "Pick a contact above and press “Write email”." : "Add an email above (or search the web) to write one."}</div>`;
+
+  $("#drawer-body").innerHTML = `
+    <div class="d-head"><div><h2>${esc(s.name)}</h2><div>${esc(s.sector || "")}</div>
+      <div class="sub">discovered ${esc(s.discovered_at)}</div></div>
+      <button class="close" id="btn-close" aria-label="Close">×</button></div>
+    <div class="d-actions">${site ? link(site, "Website ↗") : ""} ${link(s.source_url, "Funding news ↗")}
+      ${s.status === "skipped" || s.status === "filtered_out" ? '<button class="btn small" id="s-restore">Move to good fits</button>' : !emailed ? '<button class="btn small" id="s-skip">Skip this startup</button>' : ""}
+      <button class="btn small" id="s-rescore" title="Score the fit again with Gemini">Re-score</button>
+      <span class="tag">${esc(s.status.replace("_", " "))}</span><span class="sub">${esc(s.status_reason || "")}</span></div>
+
+    <div class="section"><h3>Company</h3><div class="grid2">
+      <div class="k">What they build</div><div>${esc(s.description || "—")}</div>
+      <div class="k">Origin</div><div>${esc([s.hq_city, s.hq_country].filter(Boolean).join(", ") || "not stated")} ${regionTag(s.region)}</div>
+      <div class="k">Founded</div><div>${esc(s.founded_year || "not stated")}</div>
+      <div class="k">Founders</div><div>${list(s.founders)}</div>
+      <div class="k">India presence</div><div>${esc(s.india_presence || "—")}</div>
+      ${s.region === "japan" || s.region === "uae" || s.india_hiring_evidence ? `<div class="k">Hires from India</div><div>${esc(s.india_hiring_evidence || "—")}</div>` : ""}
+      <div class="k">Website</div><div>${site ? link(site, s.domain || s.website) : "—"}</div></div></div>
+
+    <div class="section"><h3>Funding</h3><div class="grid2">
+      <div class="k">Round</div><div><b>${esc(roundLabel(s.funding_round))}</b></div>
+      <div class="k">Amount</div><div>${esc(s.amount || "not stated")}</div>
+      <div class="k">Funding date</div><div>${esc(s.funding_date || "—")} <span class="sub">${esc(ago(s.funding_date))}</span></div>
+      <div class="k">Investors</div><div>${list(s.investors)}</div>
+      <div class="k">Use of funds</div><div>${esc(s.use_of_funds || "not stated")}</div>
+      <div class="k">Source</div><div><div class="evidence">“${esc(s.evidence || "")}” — ${link(s.source_url, s.source_title || "source")}</div>
+        ${(s.other_sources || []).length ? `<div class="sub" style="margin-top:4px">Also reported: ${s.other_sources.map((u, i) => link(u, `source ${i + 2}`)).join(" · ")}</div>` : ""}</div></div></div>
+
+    ${f ? `<div class="section"><h3>Fit with your resume</h3><div class="grid2">
+      <div class="k">Score</div><div>${scoreBadge(f.score)} <span class="tag">${esc(f.relevance)} relevance</span> <span class="tag ${f.recommendation === "reach_out" ? "good" : f.recommendation === "consider" ? "warn" : "bad"}">${esc(f.recommendation.replace("_", " "))}</span> <span class="sub">${f.model ? "by " + esc(f.model) : ""}</span></div>
+      <div class="k">Matching skills</div><div class="chips">${list(f.matching_skills, "good")}</div>
+      <div class="k">Roles you could fill</div><div class="chips">${list(f.likely_roles, "info")}</div>
+      <div class="k">Hiring signals</div><div>${bullets(f.hiring_signals)}</div>
+      <div class="k">Why</div><div>${esc(f.reasoning)}</div>
+      <div class="k">Best resume</div><div>${esc(f.best_resume)}</div></div></div>` : `<div class="section"><div class="sub">Not scored${s.status === "filtered_out" ? " (filtered before scoring)" : ""}.</div></div>`}
+
+    <div class="section"><h3>Contacts</h3>${addBox}${contacts}
+      ${!emailed ? '<div class="d-actions"><button class="btn small" id="s-find" title="Company website first, then web search. Recruiter emails preferred; general inbox as fallback">Find emails (website + web)</button></div>' : ""}</div>
+
+    <div class="section"><h3>Email</h3>${emailBlock}</div>`;
+
+  $("#btn-close").onclick = closeDrawer;
+  const act = (sel, label, fn) => { const b = $(sel); if (b) b.onclick = () => busy(b, label, fn); };
+  const post = async (path, body) => { const r = await api(`/api/startups/${s.id}/${path}`, { method: "POST", body }); renderStartup(r); loadList(); refreshStatus(); return r; };
+  act("#s-skip", "Skipping", () => post("skip"));
+  act("#s-restore", "Restoring", () => post("restore"));
+  act("#s-rescore", "Scoring", () => post("rescore"));
+  act("#s-find", "Website + web search (~2–3 min)", () => post("find-contacts"));
+  act("#btn-add-save", "Adding", async () => {
+    const em = $("#add-email").value.trim().toLowerCase();
+    const r = await api(`/api/startups/${s.id}/contacts`, { method: "POST", body: { email: em, name: $("#add-name").value, source: $("#add-src").value } });
+    renderStartup(r);
+    const c = r.contacts.find((x) => x.email === em);
+    await post("draft", { contact_id: c && c.id });
+  });
+  document.querySelectorAll("[data-use]").forEach((b) => (b.onclick = () => busy(b, "Writing", () => post("draft", { contact_id: +b.dataset.use, resume: $("#em-resume")?.value }))));
+  const edits = () => ({ recipient: e.recipient, subject: $("#em-subject").value, body: $("#em-body").value, resume: $("#em-resume").value });
+  act("#btn-save", "Saving", async () => { renderStartup(await api(`/api/startup-emails/${e.id}`, { method: "PUT", body: edits() })); toast("Draft saved"); });
+  act("#btn-regen", "Rewriting", async () => {
+    const c = d.contacts.find((x) => x.email === e.recipient);
+    if (!c) throw new Error("Recipient is not in the contact list.");
+    await post("draft", { contact_id: c.id, resume: $("#em-resume").value });
+  });
+  act("#btn-approve", "Saving", async () => {
+    const saved = await api(`/api/startup-emails/${e.id}`, { method: "PUT", body: edits() });
+    renderStartup(saved);
+    confirmSend(saved, { what: saved.startup.name, url: `/api/startup-emails/${e.id}/send`, rerender: renderStartup });
   });
 }
 
 // ---------------------------------------------------------------- send confirmation
 function closeModal() { $("#modal").classList.remove("open"); }
-function confirmSend(d) {
-  const j = d.job, e = d.email;
+function confirmSend(d, opt) {
+  const e = d.email;
   const contact = d.contacts.find((c) => c.email === e.recipient);
   const [vcls, vlabel] = contact ? VERIF[contact.verification] || ["", contact.verification] : ["warn", "not in contact list"];
   $("#modal-body").innerHTML = `
-    <h2 style="margin-top:0">Send this application?</h2>
+    <h2 style="margin-top:0">${d.startup ? "Send this email to the startup?" : "Send this application?"}</h2>
     <div class="grid2">
       <div class="k">To</div><div><b>${esc(e.recipient)}</b> <span class="tag ${vcls}">${esc(vlabel)}</span></div>
-      <div class="k">Recruiter</div><div>${esc(e.recruiter_name || "Hiring Team")}</div>
-      <div class="k">Role</div><div>${esc(j.title)} — ${esc(j.company)}</div>
+      <div class="k">${d.startup ? "Contact" : "Recruiter"}</div><div>${esc(e.recruiter_name || (d.startup ? d.startup.name + " Team" : "Hiring Team"))}</div>
+      <div class="k">${d.startup ? "Startup" : "Role"}</div><div>${esc(opt.what)}</div>
       <div class="k">Subject</div><div>${esc(e.subject)}</div>
       <div class="k">Attachment</div><div>📎 ${esc(e.attachment_sent_as)} <span class="sub">(from ${esc(e.attachment_name)})</span> ${e.attachment_kb != null ? `(${e.attachment_kb} KB)` : '<span class="tag bad">missing</span>'}</div>
       <div class="k">From</div><div>${esc(status?.gmail.account || "—")}</div>
@@ -300,8 +478,8 @@ function confirmSend(d) {
   $("#modal").classList.add("open");
   $("#m-cancel").onclick = closeModal;
   $("#m-send").onclick = () => busy($("#m-send"), "Sending", async () => {
-    const r = await api(`/api/emails/${e.id}/send`, { method: "POST", body: { approved: true, recipient: e.recipient, subject: e.subject } });
-    closeModal(); toast(r.message); renderJob(r); loadList(); refreshStatus();
+    const r = await api(opt.url, { method: "POST", body: { approved: true, recipient: e.recipient, subject: e.subject } });
+    closeModal(); toast(r.message); opt.rerender(r); loadList(); refreshStatus();
   });
 }
 

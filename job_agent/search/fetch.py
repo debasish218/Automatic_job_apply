@@ -7,7 +7,7 @@ import threading
 import time
 import urllib.robotparser
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -31,6 +31,41 @@ class Page:
     status: str                 # "fetched" | "robots_disallowed" | "blocked_site" | "http_<code>" | "error"
     text: str = ""
     job_postings: list[dict] = field(default_factory=list)
+    mailtos: list[tuple[str, str]] = field(default_factory=list)   # (email, link text) from mailto / protected links
+    links: list[tuple[str, str]] = field(default_factory=list)     # (absolute url, link text)
+    final_url: str = ""
+
+
+def decode_cfemail(hexstr: str) -> str | None:
+    """Decode a Cloudflare-protected address (the real address is in the page, XOR-encoded)."""
+    try:
+        key = int(hexstr[:2], 16)
+        return "".join(chr(int(hexstr[i:i + 2], 16) ^ key) for i in range(2, len(hexstr), 2))
+    except ValueError:
+        return None
+
+
+def _markup_emails(soup, base_url: str) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    mailtos, links = [], []
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        label = " ".join(a.get_text(" ").split())[:120]
+        if href.lower().startswith("mailto:"):
+            addr = unquote(href[7:].split("?")[0]).strip()
+            for one in addr.split(","):
+                if "@" in one:
+                    mailtos.append((one.strip(), label))
+        elif "/cdn-cgi/l/email-protection#" in href:
+            dec = decode_cfemail(href.split("#", 1)[1])
+            if dec:
+                mailtos.append((dec, label))
+        elif not href.startswith(("#", "javascript:", "tel:")):
+            links.append((urljoin(base_url, href), label))
+    for el in soup.select("[data-cfemail]"):
+        dec = decode_cfemail(el["data-cfemail"])
+        if dec:
+            mailtos.append((dec, " ".join(el.parent.get_text(" ").split())[:120] if el.parent else ""))
+    return mailtos, links
 
 
 def host_of(url: str) -> str:
@@ -108,6 +143,7 @@ class PageFetcher:
             return Page(url, False, f"http_{r.status_code}")
         html = content.decode(r.encoding or "utf-8", errors="replace")
         soup = BeautifulSoup(html, "html.parser")
+        mailtos, links = _markup_emails(soup, r.url or url)
         postings = []
         for s in soup.find_all("script", type="application/ld+json"):
             try:
@@ -121,7 +157,7 @@ class PageFetcher:
         for t in soup(["script", "style", "noscript", "svg"]):
             t.decompose()
         text = "\n".join(ln.strip() for ln in soup.get_text("\n").splitlines() if ln.strip())
-        return Page(url, True, "fetched", text, postings)
+        return Page(url, True, "fetched", text, postings, mailtos, links, r.url or url)
 
 
 def _walk_ld(data):

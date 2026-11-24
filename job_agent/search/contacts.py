@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel, Field
 
 from ..gemini_client import GeminiClient
-from ..recruiter import EMAIL_RE, classify
+from ..recruiter import EMAIL_RE, classify, classify_startup
 from .fetch import PageFetcher, host_of, is_data_broker, is_never_fetch
 from .searx import SearxClient, SearxError
 
@@ -57,7 +57,7 @@ class ContactOut(BaseModel):
     linkedin_url: str = Field(description="LinkedIn profile URL exactly as given in the sources, or empty")
     source_id: int
     evidence_quote: str = Field(description="Short verbatim quote from that source supporting this contact")
-    kind: str = Field(description="recruiter | hr_inbox | careers_inbox | job_post_contact | other")
+    kind: str = Field(description="recruiter | founder | hr_inbox | careers_inbox | job_post_contact | other")
     works_at_company: bool = Field(description="True only if the source clearly ties this contact to the company")
     relevant_to_role: bool = Field(default=True, description="False if the source shows this person/inbox hires for a "
                                    "clearly different function (finance, accounting, sales, HR ops, non-tech "
@@ -85,9 +85,16 @@ STRICT RULES:
 - relevant_to_role must be false when the source shows the contact recruiting for an unrelated function
   (e.g. "hiring CA trainees for Accounting & Finance") — this job is a technical AI/ML role.
 - Max 8 contacts, most relevant first (India-based recruiters first).
-
+{startup_note}
 SOURCES:
 {sources}
+"""
+
+
+STARTUP_NOTE = """- This is a recently funded early-stage startup the candidate wants to contact about AI/ML engineering roles.
+  Founders, co-founders, CTO / CEO, hiring or careers inboxes and general team inboxes (hello@, team@, contact@)
+  are all useful here. Use kind "founder" for founders / CXOs, "careers_inbox" for careers/jobs/HR inboxes and
+  "general_inbox" for general inboxes (hello@, info@, contact@, team@).
 """
 
 
@@ -116,7 +123,15 @@ class ContactFinder:
         self.gemini = gemini
         self.max_pages = max_pages
 
-    def _queries(self, company: str, domain: str | None, deep: bool = False) -> list[str]:
+    def _queries(self, company: str, domain: str | None, deep: bool = False, startup: bool = False) -> list[str]:
+        if startup:
+            q = [f'"{company}" founder CTO email' + (f" {domain}" if domain else " startup"),
+                 f'"{company}" careers hiring AI engineer' + (f" site:{domain}" if domain else "")]
+            if deep:
+                q += [f'"{company}" hiring "send your resume" OR "reach out" OR "email us" OR "write to us"',
+                      f'"{company}" founder hiring engineers site:linkedin.com/posts',
+                      f'"@{domain}"' if domain else f'"{company}" startup contact email']
+            return q
         q = [f"{company} HR recruiter email India careers",
              f"{company} talent acquisition India LinkedIn"]
         if deep:   # where recruiter emails actually get published: hiring posts and "send your CV" lines
@@ -131,17 +146,20 @@ class ContactFinder:
         if not domain:
             return []
         base = f"https://{domain}"
-        return [f"{base}/careers", f"{base}/contact", f"{base}/contact-us", f"{base}/careers/"]
+        return [f"{base}/careers", f"{base}/contact", f"{base}/contact-us", f"{base}/careers/", f"{base}/about",
+                f"{base}/jobs", f"{base}"]
 
     def find(self, company: str, title: str, location: str, job_url: str, job_text: str,
-             domain_hint: str | None, deep: bool = False) -> tuple[list[FoundContact], str | None, list[str]]:
-        """Returns (contacts, company_domain, queries_used). deep=True adds email-focused searches."""
+             domain_hint: str | None, deep: bool = False,
+             startup: bool = False) -> tuple[list[FoundContact], str | None, list[str]]:
+        """Returns (contacts, company_domain, queries_used). deep=True adds email-focused searches;
+        startup=True targets founders and team inboxes of an early-stage company instead of recruiters."""
         sources: list[Source] = []
         # Source 0: the job posting itself (emails printed in the JD are the most relevant)
         if job_text and EMAIL_RE.search(job_text):
             sources.append(Source(0, job_url, f"Job posting: {title}", "", _email_contexts(job_text), True))
         seen = {job_url}
-        queries = self._queries(company, domain_hint, deep)
+        queries = self._queries(company, domain_hint, deep, startup)
         per_query = 12 if deep else 8
         for q in queries:
             try:
@@ -195,12 +213,15 @@ class ContactFinder:
                               + (f"\nPAGE EXCERPTS WITH EMAILS: {s.page_text}" if s.page_text else "")
                               for s in sources)[:30000]
         out = self.gemini.generate_json(PROMPT.format(company=company, title=title, location=location,
-                                                      domain_hint=domain_hint or "unknown", sources=listing),
+                                                      domain_hint=domain_hint or "unknown", sources=listing,
+                                                      startup_note=STARTUP_NOTE if startup else ""),
                                         ContactsOut, temperature=0, task="light")
         domain = (out.company_domain or domain_hint or "").lower().removeprefix("www.") or None
-        return self._validate(out, sources, domain), domain, queries
+        return self._validate(out, sources, domain, startup), domain, queries
 
-    def _validate(self, out: ContactsOut, sources: list[Source], domain: str | None) -> list[FoundContact]:
+    def _validate(self, out: ContactsOut, sources: list[Source], domain: str | None,
+                  startup: bool = False) -> list[FoundContact]:
+        kind_of = classify_startup if startup else classify
         by_id = {s.sid: s for s in sources}
         result: list[FoundContact] = []
         seen_keys = set()
@@ -216,7 +237,7 @@ class ContactFinder:
                 elif email not in text.lower():
                     log.info("Dropped email %s: not literally present in source %s", email, src.url)
                     email = None
-                elif classify(email) is None:
+                elif kind_of(email) is None:
                     email = None
             linkedin = (c.linkedin_url or "").strip() or None
             if linkedin and not any(linkedin.rstrip("/") == s.url.rstrip("/") for s in sources):
@@ -242,6 +263,10 @@ class ContactFinder:
                 ed = email.split("@")[1]
                 dm = bool(domain and (ed == domain or ed.endswith("." + domain) or domain.endswith(ed)))
             kind = c.kind or "other"
+            if startup and email and kind_of(email) == "general_inbox":
+                kind = "general_inbox"
+            elif startup and email and kind_of(email) == "careers_inbox":
+                kind = "careers_inbox"
             if not c.relevant_to_role:
                 kind = "other_function"
             if src.sid == 0 and email and src.url == sources[0].url and sources[0].title.startswith("Job posting"):
@@ -250,7 +275,8 @@ class ContactFinder:
                 kind = "careers_inbox" if email and classify(email) == "recruiting_inbox" else "recruiter"
             result.append(FoundContact(c.name or None, c.designation or None, email, linkedin, src.url, evidence,
                                        verification, kind, dm))
-        rank = {"job_post_contact": 0, "recruiter": 1, "hr_inbox": 2, "careers_inbox": 3}
+        rank = {"job_post_contact": 0, "recruiter": 1, "founder": 1, "hr_inbox": 2, "careers_inbox": 3,
+                "general_inbox": 6}
         result.sort(key=lambda f: (f.email is None, not f.domain_match if f.email else True,
                                    rank.get(f.kind, 4)))
         return result
